@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  带圆形端面测力装置的可抓取圆柱体。
+
+  圆柱体外形尺寸：直径 = 0.08 米，高度 = 0.10 米。
+  局部 +Z 方向对应装有测力装置的圆形端面。
+  所有尺寸均以米为单位；力的输出以牛顿为单位。
+
+  圆柱主体和厚度为 2 毫米的端盖是两个碰撞几何体，
+  通过父子刚体关系刚性连接。
+  端盖是固定的子刚体（无关节）：这样设计是为了让
+  MuJoCo 的三轴 <force> 传感器测量连接界面传递的力。
+  整个组件通过父刚体的 <freejoint> 自由运动。
+
+  传感器输出：
+    endface_normal_force：标量（牛顿），表示测力端盖上的
+      法向接触力之和，非负；该端面未受到接触时为零。
+    endface_force_xyz：三维向量（牛顿），表示在传感器局部
+      坐标系中从子刚体传递到父刚体的力。包含端盖的惯性及重力影响；
+      因此并非仅测量接触力。
+-->
+<mujoco model="graspable_cylinder_with_endface_force_sensor">
+  <compiler angle="radian" fusestatic="false"/>
+  
+  <worldbody>
+      <body name="graspable_cylinder" pos="0 0 0.065">
+      <freejoint name="cylinder_free_joint"/>
+
+      <!-- 圆柱主体：z = [-0.050, +0.048]（高度为 98 毫米）。 -->
+      <geom name="cylinder_body_collision" type="cylinder"
+            pos="0 0 -0.001" size="0.040 0.049"
+            density="1000"
+            rgba="0.25 0.52 0.80 1"
+            contype="1" conaffinity="1" condim="4"
+            friction="1.0 0.005 0.0001"/>
+
+      <!-- 测力端盖：z = [+0.048, +0.050]（厚度为 2 毫米）。
+           固定于圆柱主体，但特意保留为独立刚体，
+           以便 MuJoCo 力传感器具有可测量的连接界面。 -->
+      <body name="sensing_endcap" pos="0 0 0.049">
+        <geom name="cylinder_endface_collision" type="cylinder"
+              pos="0 0 0" size="0.040 0.001"
+              mass="0.002"
+              rgba="0.93 0.45 0.20 1"
+              contype="1" conaffinity="1" condim="4"
+              friction="1.0 0.005 0.0001"/>
+
+        <!-- +Z 圆形端面周围的接触检测区域。
+             标记点（site）不贡献碰撞形状或质量。 -->
+        <site name="endface_touch_zone" type="cylinder"
+              pos="0 0 0.001" size="0.0405 0.0015"
+              rgba="1 0.4 0.15 0.15"/>
+
+        <!-- 力传感器坐标系：+Z 为端面朝外的法向方向。 -->
+        <site name="endface_force_frame" type="sphere"
+              pos="0 0 0.001" size="0.002"
+              rgba="1 0.9 0.1 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <!-- +Z 端盖表面上的法向接触力标量（牛顿）。 -->
+    <touch name="endface_normal_force" site="endface_touch_zone"/>
+    <!-- 三轴内部界面力（牛顿）；包含端盖的惯性载荷。 -->
+    <force name="endface_force_xyz" site="endface_force_frame"/>
+  </sensor>
+</mujoco>

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="L_support_graspable">
+  <!--
+    可抓取、可自由运动的 L 形支架（所有单位均采用国际单位制）。
+
+    X-Z 平面：L 形截面；Y 轴：统一宽度方向。
+
+    内侧水平边：0.40 米（从 x=0.02 到 x=0.42）。
+    内侧竖直边：0.25 米（从 z=0.12 到 z=0.37）。
+
+    统一宽度（Y）：           0.20 米。
+    竖直板厚度（X）：         0.02 米。
+    水平底板厚度：           0.12 米。
+
+    外部尺寸（X,Y,Z）：       0.42 × 0.20 × 0.37 米。
+
+    刚体坐标系原点：外侧底部与背部的交角，
+                    位于 (x,z)=(0,0)。
+
+    竖直板：
+      x=[0,0.02]
+      y=[-0.10,0.10]
+      z=[0,0.37]
+
+    底板：
+      x=[0.02,0.42]
+      y=[-0.10,0.10]
+      z=[0,0.12]
+
+    两个碰撞几何体共同组成一个刚体。
+    密度为 1000 千克/立方米时，总质量为 11.08 千克。
+  -->
+
+  <compiler angle="radian" inertiafromgeom="auto"/>
+
+  <worldbody>
+
+    <!-- L 形支架 -->
+    <body name="L_support" pos="-0.21 0 0.01">
+
+      <freejoint name="L_support_free"/>
+
+      <!--
+        竖直板：
+        总高度 = 37 厘米
+        厚度 = 2 厘米
+      -->
+      <geom name="L_support_long_leg"
+            type="box"
+            pos="0.01 0 0.185"
+            size="0.01 0.10 0.185"
+            density="1000"
+            rgba="0.20 0.55 0.85 1"
+            contype="1"
+            conaffinity="1"
+            condim="4"
+            friction="1.0 0.005 0.0001"/>
+
+      <!--
+        水平底板：
+        内侧长度 = 40 厘米
+        厚度 = 12 厘米
+      -->
+      <geom name="L_support_short_leg"
+            type="box"
+            pos="0.22 0 0.06"
+            size="0.20 0.10 0.06"
+            density="1000"
+            rgba="0.20 0.55 0.85 1"
+            contype="1"
+            conaffinity="1"
+            condim="4"
+            friction="1.0 0.005 0.0001"/>
+
+      <!-- 内角标记 -->
+      <site name="L_support_inner_corner"
+            type="sphere"
+            pos="0.02 0 0.12"
+            size="0.003"
+            rgba="1 0.3 0.1 0.7"
+            group="4"/>
+
+    </body>
+
+  </worldbody>
+
+</mujoco>

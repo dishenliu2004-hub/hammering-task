@@ -1,0 +1,28 @@
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本地虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器配置
+.vscode/
+.idea/
+
+# 本地配置及凭据
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 日志
+*.log
+MUJOCO_LOG.TXT
+
+# 权重、本地运行库和授权文件
+/weight/

@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ADROIT 锤击场景，版权归 Vikash Kumar 所有。
+    采用 Apache 许可证，2.0 版。
+-->
+<mujoco model="hammering_scene">
+    <option integrator="implicitfast" />
+
+    <asset>
+        <texture name="woodcube" type="cube" file="textures/woodb.png" />
+        <material name="tablecube" texture="woodcube" rgba="0.8 0.8 0.8 1" />
+        <model name="cylinder" file="cylinder_sensor.xml" />
+        <model name="support" file="L_support.xml" />
+        <model name="camera" file="../camera/realsense_d435i/d435i.xml" />
+        <model name="gripper" file="../grippers/omnipicker/ominipicker.xml" />
+        <model name="hammer" file="hammer.xml" />
+    </asset>
+
+    <worldbody>
+        <light directional="false" diffuse=".7 .7 .7" specular="0.03 0.03 0.03"
+               pos="-1 -1.0 4.0" dir="1 1.0 -4" />
+
+        <body name="table">
+            <geom size="0.45 0.45 0.025" pos="0 0 -0.025"
+                  type="box" material="tablecube" />
+
+            <geom size="0.04 0.5" pos="0.4 0.4 -0.501"
+                  quat="0 1 0 0" type="cylinder"
+                  contype="0" conaffinity="0" />
+
+            <geom size="0.04 0.5" pos="-0.4 0.4 -0.501"
+                  quat="0 1 0 0" type="cylinder"
+                  contype="0" conaffinity="0" />
+
+            <geom size="0.04 0.5" pos="0.4 -0.4 -0.501"
+                  quat="0 1 0 0" type="cylinder"
+                  contype="0" conaffinity="0" />
+
+            <geom size="0.04 0.5" pos="-0.4 -0.4 -0.501"
+                  quat="0 1 0 0" type="cylinder"
+                  contype="0" conaffinity="0" />
+        </body>
+
+        <!-- 圆柱体 -->
+        <frame pos="-0.37 0.10 -0.015">
+            <attach model="cylinder"
+                    body="graspable_cylinder"
+                    prefix="cylinder_" />
+        </frame>
+
+        <!-- L 形支架 -->
+        <frame pos="0.30 0.15 -0.01"
+               quat="0.70710678 0 0 -0.70710678">
+            <attach model="support"
+                    body="L_support"
+                    prefix="support_" />
+        </frame>
+
+        <!-- RealSense D435i 相机 -->
+        <body name="camera_mount"
+              pos="0 -0.7 0.7"
+              quat="0.8870108 0.4617486 0 0">
+
+            <frame quat="0 0 1 0">
+                <attach model="camera"
+                        body="d435i"
+                        prefix="camera_" />
+            </frame>
+
+            <camera name="fixed" />
+        </body>
+
+        <!-- 夹爪 -->
+        <body name="gripper_mount"
+              mocap="true"
+              pos="0 -0.55 0.4"
+              quat="0 1 0 0">
+
+            <attach model="gripper"
+                    body="base_link"
+                    prefix="gripper_" />
+        </body>
+
+        <attach model="hammer" body="Object" prefix="hammer_" />
+    </worldbody>
+
+    <!-- ======= 将物体固定到桌子上 ======= -->
+    <equality>
+
+        <!-- 将圆柱体固定到桌子上 -->
+        <weld name="fix_cylinder"
+              body1="table"
+              body2="cylinder_graspable_cylinder" />
+
+        <!-- 将 L 形支架固定到桌子上 -->
+        <weld name="fix_support"
+              body1="table"
+              body2="support_L_support" />
+
+    </equality>
+
+</mujoco>

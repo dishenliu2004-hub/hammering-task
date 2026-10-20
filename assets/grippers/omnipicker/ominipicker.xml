@@ -1,0 +1,248 @@
+<mujoco model="ominipicker">
+  <compiler angle="radian" meshdir="meshes" autolimits="true"/>
+  <option timestep="0.001" integrator="implicitfast" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight diffuse="0.7 0.7 0.7" ambient="0.3 0.3 0.3" specular="0.2 0.2 0.2"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="135" elevation="-20"/>
+  </visual>
+
+  <default>
+    <joint damping="0.002" frictionloss="0.0002" armature="1e-5"/>
+    <geom type="mesh" rgba="0.75 0.75 0.75 1"
+          friction="1.1 0.5 0.01" priority="1"
+          solref="0.006 1" solimp="0.9 0.95 0.001"/>
+  </default>
+
+  <asset>
+    <texture name="skybox" type="skybox" builtin="gradient"
+             rgb1="0.25 0.35 0.45" rgb2="0.02 0.02 0.03" width="512" height="3072"/>
+    <mesh name="base_mesh_1" file="base_link_part1.STL"/>
+    <mesh name="base_mesh_2" file="base_link_part2.STL"/>
+    <mesh name="narrow1_mesh" file="narrow1_Link.STL"/>
+    <mesh name="narrow2_mesh" file="narrow2_Link.STL"/>
+    <mesh name="narrow3_mesh" file="narrow3_Link.STL"/>
+    <mesh name="narrow_loop_mesh" file="narrow_loop_Link.STL"/>
+    <mesh name="wide1_mesh" file="wide1_Link.STL"/>
+    <mesh name="wide2_mesh" file="wide2_Link.STL"/>
+    <mesh name="wide3_mesh" file="wide3_Link.STL"/>
+    <mesh name="wide_loop_mesh" file="wide_loop_Link.STL"/>
+    <!-- Only each underactuated fingertip inner arc is split at its midpoint. -->
+    <mesh name="narrow3_collision_proximal_mesh"
+          file="collision/narrow3_collision_proximal.stl"/>
+    <mesh name="narrow3_collision_distal_mesh"
+          file="collision/narrow3_collision_distal.stl"/>
+    <mesh name="narrow3_collision_tip_mesh"
+          file="collision/narrow3_collision_tip.stl"/>
+    <mesh name="wide3_collision_proximal_mesh"
+          file="collision/wide3_collision_proximal.stl"/>
+    <mesh name="wide3_collision_distal_mesh"
+          file="collision/wide3_collision_distal.stl"/>
+    <mesh name="wide3_collision_tip_mesh"
+          file="collision/wide3_collision_tip.stl"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 -0.3 0.4" dir="0 0.6 -1"/>
+    <geom name="floor" type="plane" size="0.3 0.3 0.01" pos="0 0 -0.002"
+          rgba="0.18 0.20 0.22 1" contype="0" conaffinity="0"/>
+
+    <body name="base_link">
+      <inertial pos="-0.00005520 0.000012341 0.03296193" mass="0.25641368"
+                fullinertia="4.6351e-4 4.4525e-4 1.0438e-4 -1e-8 -1.04e-6 -5e-8"/>
+      <geom name="base_visual_1" mesh="base_mesh_1" rgba="0.90 0.92 0.93 1"
+            contype="0" conaffinity="0"/>
+      <geom name="base_visual_2" mesh="base_mesh_2" rgba="0.90 0.92 0.93 1"
+            contype="0" conaffinity="0"/>
+      <geom name="base_collision_part1" mesh="base_mesh_1" rgba="0 0 0 0" group="3"/>
+      <geom name="base_collision_part2" mesh="base_mesh_2" rgba="0 0 0 0" group="3"/>
+
+      <body name="hand_narrow1_Link" pos="0 -0.0195 0.0565"
+            quat="0.00464845 0.70709022 -0.00464806 0.70709279">
+        <inertial pos="0.0094685 0.0068806 0.000065437" mass="0.025428"
+                  fullinertia="1.9574e-6 2.3919e-6 1.5501e-6 -4.2911e-7 -3.7111e-11 -3.008e-10"/>
+        <joint name="hand_narrow1_joint" type="hinge" axis="0 0 -1"
+               range="-0.75 0.05" damping="0.005"
+               solreflimit="0.002 1" solimplimit="0.99 0.999 0.001"/>
+        <geom name="hand_narrow1_visual" mesh="narrow1_mesh"
+              contype="0" conaffinity="0"/>
+        <geom name="hand_narrow1_collision" mesh="narrow1_mesh" rgba="0 0 0 0" group="3"/>
+
+        <body name="hand_narrow2_Link" pos="0.030852 0.018551 0">
+          <inertial pos="0.0088027 -0.007035 0.000016424" mass="0.0040132"
+                    fullinertia="1.0307e-7 1.1385e-7 1.7009e-7 5.7851e-8 9.5801e-11 -2.81e-11"/>
+          <!-- The torsion spring sets the passive response; the distal stop is on narrow3. -->
+          <joint name="hand_narrow2_joint" type="hinge" axis="0 0 -1"
+                 stiffness="0.2" springref="-0.24" damping="0.004"/>
+          <geom name="hand_narrow2_geom" mesh="narrow2_mesh"/>
+
+          <body name="hand_narrow3_Link" pos="0.018118 -0.01574 0">
+            <inertial pos="0.012508 -0.0079729 0.000094339" mass="0.018029"
+                      fullinertia="1.1403e-6 2.5704e-6 2.3252e-6 5.5159e-7 -4.0096e-13 1.0951e-12"/>
+            <!-- 1.148156989 rad local travel gives 45.84 deg world-frame travel
+                 under the documented single-finger, no-contact limit probe. -->
+            <joint name="hand_narrow3_joint" type="hinge" axis="0 0 -1"
+                   range="0.285759416 1.433916405"
+                   solreflimit="0.002 1" solimplimit="0.99 0.999 0.001"/>
+            <geom name="hand_narrow3_visual" mesh="narrow3_mesh"
+                  contype="0" conaffinity="0"/>
+            <!-- Inner arc: endpoint A -> arc midpoint M -> endpoint B. -->
+            <geom name="hand_narrow_fingertip_proximal"
+                  mesh="narrow3_collision_proximal_mesh"
+                  friction="1.1 0.5 0.01" solref="0.004 1"
+                  solimp="0.95 0.99 0.001" priority="1" condim="4"
+                  rgba="0 0 0 0" group="3"/>
+            <geom name="hand_narrow_fingertip_distal"
+                  mesh="narrow3_collision_distal_mesh"
+                  friction="1.1 0.5 0.01" solref="0.004 1"
+                  solimp="0.95 0.99 0.001" priority="1" condim="4"
+                  rgba="0 0 0 0" group="3"/>
+            <!-- The non-arc B-to-tip region keeps its default convex collision. -->
+            <geom name="hand_narrow_fingertip_tip"
+                  mesh="narrow3_collision_tip_mesh"
+                  friction="1.1 0.5 0.01" solref="0.004 1"
+                  solimp="0.95 0.99 0.001" priority="1" condim="4"
+                  rgba="0 0 0 0" group="3"/>
+            <site name="hand_narrow_tip" pos="0 -0.0104 0" size="0.0015" rgba="1 0.3 0.2 1"/>
+            <site name="hand_narrow_contact_tip" pos="0.047877766 -0.022280006 0"
+                  size="0.001" rgba="0 1 0 0"/>
+            <site name="hand_narrow_outer_tip" pos="0.047429714 -0.021336688 0.001318760"
+                  size="0.001" rgba="0 1 0 0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="hand_narrow_loop_Link" pos="0 -0.021633 0.07387"
+            quat="0.00464845 0.70709022 -0.00464806 0.70709279">
+        <inertial pos="0.014869 -0.0036066 0.00029307" mass="0.022591"
+                  fullinertia="4.3916e-6 4.737e-6 6.0445e-7 1.114e-7 -4.9655e-12 1.7121e-11"/>
+        <joint name="hand_narrow_loop_joint" type="hinge" axis="0 0 -1" range="-1.1 1.1"/>
+        <geom name="hand_narrow_loop_visual" mesh="narrow_loop_mesh"
+              contype="0" conaffinity="0"/>
+        <geom name="hand_narrow_loop_collision" mesh="narrow_loop_mesh" rgba="0 0 0 0" group="3"/>
+        <site name="hand_narrow_loop_tip" pos="0.031600001 -0.009721825 -0.000028106" size="0.0015" rgba="1 0.3 0.2 1"/>
+      </body>
+
+      <body name="hand_wide1_Link" pos="0 0.0195 0.0565"
+            quat="0.00464845 0.70709022 -0.00464806 0.70709279">
+        <inertial pos="0.0095051 -0.0068479 0.000068268" mass="0.025428"
+                  fullinertia="1.9565e-6 2.3928e-6 1.5501e-6 4.2798e-7 2.3844e-10 -1.4454e-10"/>
+        <joint name="hand_wide1_joint" type="hinge" axis="0 0 -1"
+               range="-0.05 0.75" damping="0.005"
+               solreflimit="0.002 1" solimplimit="0.99 0.999 0.001"/>
+        <geom name="hand_wide1_visual" mesh="wide1_mesh"
+              contype="0" conaffinity="0"/>
+        <geom name="hand_wide1_collision" mesh="wide1_mesh" rgba="0 0 0 0" group="3"/>
+
+        <body name="hand_wide2_Link" pos="0.030852 -0.018551 0">
+          <inertial pos="0.0088027 0.007035 -0.000016424" mass="0.0040132"
+                    fullinertia="1.0307e-7 1.1385e-7 1.7009e-7 -5.7851e-8 -9.58e-11 -2.81e-11"/>
+          <!-- Mirrored passive spring; the distal stop is on wide3. -->
+          <joint name="hand_wide2_joint" type="hinge" axis="0 0 -1"
+                 stiffness="0.2" springref="0.24" damping="0.004"/>
+          <geom name="hand_wide2_geom" mesh="wide2_mesh"/>
+
+          <body name="hand_wide3_Link" pos="0.018118 0.01574 0">
+            <inertial pos="0.016206 0.0094593 0.000047668" mass="0.035835"
+                      fullinertia="8.5056e-6 1.1235e-5 4.6309e-6 -1.1363e-6 -4.2908e-11 -2.9251e-11"/>
+            <!-- 1.139189565 rad local travel gives 45.84 deg world-frame travel
+                 under the documented single-finger, no-contact limit probe. -->
+            <joint name="hand_wide3_joint" type="hinge" axis="0 0 -1"
+                   range="-1.424674968 -0.285485403"
+                   solreflimit="0.002 1" solimplimit="0.99 0.999 0.001"/>
+            <geom name="hand_wide3_visual" mesh="wide3_mesh"
+                  contype="0" conaffinity="0"/>
+            <!-- Inner arc: endpoint A -> arc midpoint M -> endpoint B. -->
+            <geom name="hand_wide_fingertip_proximal"
+                  mesh="wide3_collision_proximal_mesh"
+                  friction="1.1 0.5 0.01" solref="0.004 1"
+                  solimp="0.95 0.99 0.001" priority="1" condim="4"
+                  rgba="0 0 0 0" group="3"/>
+            <geom name="hand_wide_fingertip_distal"
+                  mesh="wide3_collision_distal_mesh"
+                  friction="1.1 0.5 0.01" solref="0.004 1"
+                  solimp="0.95 0.99 0.001" priority="1" condim="4"
+                  rgba="0 0 0 0" group="3"/>
+            <!-- The non-arc B-to-tip region keeps its default convex collision. -->
+            <geom name="hand_wide_fingertip_tip"
+                  mesh="wide3_collision_tip_mesh"
+                  friction="1.1 0.5 0.01" solref="0.004 1"
+                  solimp="0.95 0.99 0.001" priority="1" condim="4"
+                  rgba="0 0 0 0" group="3"/>
+            <site name="hand_wide_tip" pos="0 0.0104 0" size="0.0015" rgba="0.2 0.6 1 1"/>
+            <site name="hand_wide_contact_tip" pos="0.047844410 0.022279657 0"
+                  size="0.001" rgba="0 1 0 0"/>
+            <site name="hand_wide_outer_tip" pos="0.047241371 0.021212433 -0.002056346"
+                  size="0.001" rgba="0 1 0 0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="hand_wide_loop_Link" pos="0 0.021633 0.07387"
+            quat="0.00464845 0.70709022 -0.00464806 0.70709279">
+        <inertial pos="0.016268 0.0040555 0.00030323" mass="0.025142"
+                  fullinertia="5.887e-6 6.236e-6 6.2389e-7 -1.1234e-7 2.1954e-11 -9.473e-12"/>
+        <joint name="hand_wide_loop_joint" type="hinge" axis="0 0 -1" range="-1.1 1.1"/>
+        <geom name="hand_wide_loop_visual" mesh="wide_loop_mesh"
+              contype="0" conaffinity="0"/>
+        <geom name="hand_wide_loop_collision" mesh="wide_loop_mesh" rgba="0 0 0 0" group="3"/>
+        <site name="hand_wide_loop_tip" pos="0.031599999 0.009721806 0.000027979" size="0.0015" rgba="0.2 0.6 1 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <contact>
+    <!-- Joint hardware overlaps the base in the assembled mechanism. -->
+    <exclude body1="base_link" body2="hand_narrow1_Link"/>
+    <exclude body1="base_link" body2="hand_narrow2_Link"/>
+    <exclude body1="base_link" body2="hand_narrow3_Link"/>
+    <exclude body1="base_link" body2="hand_narrow_loop_Link"/>
+    <exclude body1="base_link" body2="hand_wide1_Link"/>
+    <exclude body1="base_link" body2="hand_wide2_Link"/>
+    <exclude body1="base_link" body2="hand_wide3_Link"/>
+    <exclude body1="base_link" body2="hand_wide_loop_Link"/>
+    <exclude body1="hand_narrow_loop_Link" body2="hand_narrow1_Link"/>
+    <exclude body1="hand_narrow_loop_Link" body2="hand_narrow2_Link"/>
+    <exclude body1="hand_narrow_loop_Link" body2="hand_narrow3_Link"/>
+    <exclude body1="hand_wide_loop_Link" body2="hand_wide1_Link"/>
+    <exclude body1="hand_wide_loop_Link" body2="hand_wide2_Link"/>
+    <exclude body1="hand_wide_loop_Link" body2="hand_wide3_Link"/>
+  </contact>
+
+  <equality>
+    <connect name="narrow_closed_loop" body1="hand_narrow3_Link" body2="hand_narrow_loop_Link"
+             anchor="0.000099595 -0.011911627 0.105469996" solref="0.003 1"/>
+    <connect name="wide_closed_loop" body1="hand_wide3_Link" body2="hand_wide_loop_Link"
+             anchor="-0.000099950 0.011911685 0.105470004" solref="0.003 1"/>
+    <joint name="symmetric_driver" joint1="hand_wide1_joint" joint2="hand_narrow1_joint"
+           polycoef="0 -1 0 0 0" solref="0.003 1"/>
+  </equality>
+
+  <tendon>
+    <!-- One motor distributes equal and opposite torque to the mirrored drivers. -->
+    <fixed name="driver_split">
+      <joint joint="hand_narrow1_joint" coef="0.5"/>
+      <joint joint="hand_wide1_joint" coef="-0.5"/>
+    </fixed>
+  </tendon>
+
+  <actuator>
+    <!-- ctrl=0: drawing-matched maximum open; ctrl=1: fingertip closure. -->
+    <general name="gripper_actuator" tendon="driver_split"
+             dyntype="filterexact" dynprm="0.19"
+             gaintype="fixed" biastype="affine"
+             gainprm="3.863345265" biasprm="-3.863345265 -5 -0.08"
+             ctrllimited="true" ctrlrange="0 1"
+             forcelimited="true" forcerange="-0.95 0.95"/>
+  </actuator>
+
+  <keyframe>
+    <key name="home"
+         qpos="-0.745261588 -0.076352522 0.285759416 -1.167373835 0.745144675 0.076361273 -0.285485403 1.171086700"
+         ctrl="0" act="0"/>
+    <key name="closed"
+         qpos="-0.009179852 -0.076407597 0.125928033 -0.059315068 0.009124465 0.076412398 -0.126264811 0.059780293"
+         ctrl="1" act="1"/>
+  </keyframe>
+</mujoco>
