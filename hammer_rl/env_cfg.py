@@ -1,22 +1,27 @@
 """原锤击场景、物理配置、脚本控制动作和初始化事件。"""
 
+from functools import partial
 from pathlib import Path
 
 import mujoco
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 
-from .mdp.actions import MocapActionCfg
+from generation.hammer_inertia import add_head_mass
+
+from .mdp.actions import MocapActionCfg, impact_peak_force
 from .mdp.resets import reset_scene
 
 SCENE = Path(__file__).resolve().parents[1] / "assets/scenes/scene.xml"
 DT = 0.02
 
 
-def _attach_scene(spec: mujoco.MjSpec) -> None:
+def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
     source = mujoco.MjSpec.from_file(str(SCENE))
+    add_head_mass(source, hammer_head_extra_mass)
     source.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     source.option.noslip_iterations = 0
     source.geom("hammer_head").condim = 6
@@ -28,11 +33,12 @@ def _attach_scene(spec: mujoco.MjSpec) -> None:
     spec.attach(source, prefix="", frame=spec.worldbody.add_frame())
 
 
-def make_env_cfg() -> ManagerBasedRlEnvCfg:
+def make_env_cfg(hammer_head_extra_mass=0.0) -> ManagerBasedRlEnvCfg:
     model = mujoco.MjModel.from_xml_path(str(SCENE))
     opt = model.opt
     return ManagerBasedRlEnvCfg(
-        scene=SceneCfg(num_envs=1, spec_fn=_attach_scene),
+        scene=SceneCfg(num_envs=1, spec_fn=partial(
+            _attach_scene, hammer_head_extra_mass=hammer_head_extra_mass)),
         sim=SimulationCfg(
             nconmax=128,
             njmax=1024,
@@ -54,5 +60,7 @@ def make_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         decimation=round(DT / opt.timestep),
         actions={"mocap": MocapActionCfg(entity_name="gripper_mount")},
+        metrics={"impact_peak_force": MetricsTermCfg(
+            func=impact_peak_force, per_substep=True, reduce="max")},
         events={"reset_scene": EventTermCfg(func=reset_scene, mode="reset")},
     )

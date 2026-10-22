@@ -74,7 +74,13 @@
         <body name="gripper_mount"
               mocap="true"
               pos="0 -0.55 0.4"
+              quat="0 1 0 0" />
+
+        <body name="gripper_dynamic_base"
+              pos="0 -0.55 0.4"
               quat="0 1 0 0">
+
+            <freejoint name="gripper_base_free" />
 
             <attach model="gripper"
                     body="base_link"
@@ -96,6 +102,13 @@
         <weld name="fix_support"
               body1="table"
               body2="support_L_support" />
+
+        <weld name="gripper_target_weld"
+              body1="gripper_mount"
+              body2="gripper_dynamic_base"
+              solref="0.006 1"
+              solimp="0.95 0.99 0.001"
+              torquescale="1" />
 
     </equality>
 

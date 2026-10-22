@@ -18,10 +18,10 @@ def reset_scene(env, env_ids):
     scene = rng.integers(4)
 
     if scene == 0:
-        # 横躺：沿底板长边随机偏转、平移。
-        # yaw 在正负 12 度内采样；绕支架局部 Z 轴生成姿态。
+        # 横躺：圆形敲击面朝下，沿底板长边随机偏转、平移。
+        # yaw 在正负 12 度内采样；绕锤柄轴翻转 180 度后绕支架局部 Z 轴偏转。
         yaw = rng.uniform(-np.pi / 15, np.pi / 15)
-        mujoco.mju_axisAngle2Quat(local_quat, np.array([0., 0., 1.]), yaw)
+        mujoco.mju_euler2Quat(local_quat, np.array([yaw, np.pi, 0.]), "zxy")
         # 在底板上小范围平移；固定高度用于设置接近接触面的初始状态。
         position = np.array([rng.uniform(0.29, 0.33), rng.uniform(-0.02, 0.02), 0.1605])
 

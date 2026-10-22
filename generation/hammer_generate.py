@@ -1,5 +1,6 @@
 # 生成带随机锤子初始姿态的场景；抓取和锤击脚本复用返回的 model/data。
 from pathlib import Path
+import sys
 import time
 
 # 导入 MuJoCo 及其交互式查看器，NumPy 用于随机采样和坐标运算。
@@ -8,6 +9,9 @@ import numpy as np
 import mujoco_warp
 import torch
 from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from generation.hammer_inertia import add_head_mass
 
 
 # 从当前文件定位项目根目录，使场景路径不依赖终端的工作目录。
@@ -75,9 +79,11 @@ def launch_viewer(model, data, simulation):
             time.sleep(max(0, 0.02 - (time.monotonic() - start)))
 
 
-def load_random_scene():
+def load_random_scene(hammer_head_extra_mass=0.0):
     # 加载总场景及其挂接的夹爪、相机、支架、圆柱和锤子模型。
-    model = mujoco.MjModel.from_xml_path(str(SCENE))
+    spec = mujoco.MjSpec.from_file(str(SCENE))
+    add_head_mass(spec, hammer_head_extra_mass)
+    model = spec.compile()
 
     # 使用椭圆摩擦锥；MuJoCo Warp 不支持 noslip 求解器。
     # 锤头 condim=6：接触可提供法向力、切向摩擦及扭转/滚动摩擦。
@@ -98,10 +104,10 @@ def load_random_scene():
     scene = rng.integers(4)
 
     if scene == 0:
-        # 横躺：沿底板长边随机偏转、平移。
-        # yaw 在正负 12 度内采样；绕支架局部 Z 轴生成姿态。
+        # 横躺：圆形敲击面朝下，沿底板长边随机偏转、平移。
+        # yaw 在正负 12 度内采样；绕锤柄轴翻转 180 度后绕支架局部 Z 轴偏转。
         yaw = rng.uniform(-np.pi / 15, np.pi / 15)
-        mujoco.mju_axisAngle2Quat(local_quat, np.array([0., 0., 1.]), yaw)
+        mujoco.mju_euler2Quat(local_quat, np.array([yaw, np.pi, 0.]), "zxy")
         # 在底板上小范围平移；固定高度用于设置接近接触面的初始状态。
         position = np.array([rng.uniform(0.29, 0.33), rng.uniform(-0.02, 0.02), 0.1605])
 

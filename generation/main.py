@@ -2,8 +2,10 @@
 总入口：相机显示 → AnyGrasp 抓姿 → 抓取并抬升 → 敲击。
 
 cd /home/ubuntu20/CodeMujoco/hammering-task
+
 PYTHONDONTWRITEBYTECODE=1 MUJOCO_GL=glfw \
-/home/ubuntu20/anaconda3/envs/hammer/bin/python generation/main.py --pointcloud full --noise
+/home/ubuntu20/anaconda3/envs/hammer/bin/python generation/main.py \
+--pointcloud full --noise --hammer-head-extra-mass 0.1
 将 camera 替换为 full 使用完整场景点云；省略参数时默认 camera。
 追加 --noise 为所选点云来源加噪，默认无噪，两种来源均支持。
 """
@@ -26,6 +28,7 @@ from generation.knock_path import hammer_strike, move_to
 from visualization.anygrasp_grasp_visualization import show_grasps
 from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
 from visualization.full_scene_pointcloud import FullScenePointCloud
+from visualization.swing_trajectory import SwingTrajectory
 
 DT = 0.02
 
@@ -35,12 +38,14 @@ def main():
     parser.add_argument("--pointcloud", choices=("camera", "full"), default="camera",
                         help="AnyGrasp 点云来源：camera 相机视角，full 完整场景（默认 camera）")
     parser.add_argument("--noise", action="store_true", help="为所选点云来源加噪（默认关闭）")
+    parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0,
+                        help="锤头额外增加的质量，单位 kg（默认 0）")
     args = parser.parse_args()
     full_scene = args.pointcloud == "full"
     log_config = mujoco.MjLogConfig.get()
     log_config.logto_file = False
     log_config.set()
-    model, data, simulation = load_random_scene()
+    model, data, simulation = load_random_scene(args.hammer_head_extra_mass)
     if not full_scene:
         camera = CameraRGBPointCloud(model, noise=args.noise)
     grasp_figure = None
@@ -86,12 +91,17 @@ def main():
             impact_hammer_rot = (Rotation.from_matrix(target_site.xmat.reshape(3, 3))
                                  * Rotation.from_euler("y", np.pi))
             impact_mount_rot = impact_hammer_rot * relative_rot.inv()
-            hammer_strike(
+            swing_trajectory = SwingTrajectory(viewer)
+            impact_force = hammer_strike(
                 model, data, mount_body.xpos.copy(), mount_body.xquat.copy(),
                 target_site.xpos.copy(), tip_offset, impact_mount_rot.as_quat()[[3, 0, 1, 2]],
                 gripper_action=1.0, dt=DT, viewer=viewer, on_step=process_events,
-                simulation=simulation,
+                simulation=simulation, on_swing_step=swing_trajectory,
             )
+            print(f"挥击法向接触力峰值（含撞击及卸载）：{impact_force.swing_peak:.6f} N")
+            print(f"撤离法向接触力峰值：{impact_force.return_peak:.6f} N")
+            print(f"圆柱上表面撞击峰值：{impact_force.peak:.6f} N")
+            print(f"挥击开始时夹爪抓取中心到锤头中心距离：{impact_force.distance:.6f} m")
             # 动作完成后继续保留初始画面，直到关闭 MuJoCo 窗口。
             while viewer.is_running():
                 process_events()

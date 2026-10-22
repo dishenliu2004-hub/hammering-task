@@ -154,6 +154,7 @@ def generate_grasps(model, data, frame, *, full_scene=False):
     mount_quat = mount_rot.as_quat()[[3, 0, 1, 2]]
     mount_pos = (grasps["translations"][i] + grasps["depths"][i] * grasp_rot[:, 0]
                  - mount_rot.apply(tcp_offset))
+    mount_pos += 0.03 * grasp_rot[:, 0] #新增，沿接近方向额外深入30mm
     pregrasp_pos = mount_pos - 0.10 * grasp_rot[:, 0]
 
     return grasps, {

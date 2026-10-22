@@ -2,7 +2,8 @@
 
 conda activate hammer
 PYTHONDONTWRITEBYTECODE=1 MUJOCO_GL=glfw \
-python -m hammer_rl.evaluate --pointcloud full --noise --episodes 5
+python -m hammer_rl.evaluate \
+--pointcloud full --noise --episodes 5 --hammer-head-extra-mass 0.1
 """
 
 import argparse
@@ -75,11 +76,15 @@ def run_episode(env, *, pointcloud="camera", noise=False, keep_open=True):
             impact_hammer_rot = (Rotation.from_matrix(target_site.xmat.reshape(3, 3))
                                  * Rotation.from_euler("y", np.pi))
             impact_mount_rot = impact_hammer_rot * relative_rot.inv()
-            hammer_strike(
+            impact_force = hammer_strike(
                 env, data,
                 target_site.xpos.copy(), tip_offset, impact_mount_rot.as_quat()[[3, 0, 1, 2]],
                 gripper_action=1.0, dt=DT, viewer=viewer, on_step=process_events,
             )
+            print(f"挥击法向接触力峰值（含撞击及卸载）：{impact_force.swing_peak:.6f} N")
+            print(f"撤离法向接触力峰值：{impact_force.return_peak:.6f} N")
+            print(f"圆柱上表面撞击峰值：{impact_force.peak:.6f} N")
+            print(f"挥击开始时夹爪抓取中心到锤头中心距离：{impact_force.distance:.6f} m")
             # 动作完成后继续保留初始画面，直到关闭 MuJoCo 窗口。
             while keep_open and viewer.is_running():
                 process_events()
@@ -96,11 +101,13 @@ def main():
                         help="AnyGrasp 点云来源：camera 相机视角，full 完整场景（默认 camera）")
     parser.add_argument("--noise", action="store_true", help="为所选点云来源加噪（默认关闭）")
     parser.add_argument("--episodes", type=int, default=1, help="顺序执行次数（默认 1）")
+    parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0,
+                        help="锤头额外增加的质量，单位 kg（默认 0）")
     args = parser.parse_args()
     log_config = mujoco.MjLogConfig.get()
     log_config.logto_file = False
     log_config.set()
-    env = ManagerBasedRlEnv(make_env_cfg(), device="cuda:0")
+    env = ManagerBasedRlEnv(make_env_cfg(args.hammer_head_extra_mass), device="cuda:0")
     try:
         for episode in range(args.episodes):
             run_episode(env, pointcloud=args.pointcloud, noise=args.noise,

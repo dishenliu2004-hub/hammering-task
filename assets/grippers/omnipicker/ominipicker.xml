@@ -234,7 +234,7 @@
              gaintype="fixed" biastype="affine"
              gainprm="3.863345265" biasprm="-3.863345265 -5 -0.08"
              ctrllimited="true" ctrlrange="0 1"
-             forcelimited="true" forcerange="-0.95 0.95"/>
+             forcelimited="true" forcerange="-0.95 1.9"/>
   </actuator>
 
   <keyframe>
