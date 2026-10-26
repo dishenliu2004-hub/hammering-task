@@ -1,6 +1,7 @@
 """生成 AnyGrasp 候选和 Omnipicker 抓取目标；由 main.py 调用。"""
 
 from contextlib import contextmanager
+from functools import cache
 import os
 from pathlib import Path
 import subprocess
@@ -15,10 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 ANYGRASP_PY = "/home/ubuntu20/anaconda3/envs/hammer/bin/python"
 
 
-def grasp_width_to_joint_angle(width):
-    """宽度（米）对应的驱动角度（弧度）、开合指令及指尖中心偏移。"""
+@cache
+def _gripper_response():
+    """复用独立夹爪仿真，按控制量缓存开度、关节角及指尖中心偏移。"""
     import mujoco
-    from scipy.optimize import brentq
     from generation.hammer_generate import create_simulation, sync_data, write_data
 
     # 独立夹爪的无接触响应保留闭环连杆、被动弹簧和执行器特性。
@@ -28,22 +29,32 @@ def grasp_width_to_joint_angle(width):
     data = mujoco.MjData(model)
     simulation = create_simulation(model, data)
 
-    def opening_error(control):
+    @cache
+    def response(control):
         mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
         data.ctrl[model.actuator("gripper_actuator").id] = control
         write_data(simulation, data)
         for _ in range(round(2.0 / model.opt.timestep)):
             simulation.step()
         sync_data(simulation, data)
-        return (data.site("hand_wide_contact_tip").xpos[1]
-                - data.site("hand_narrow_contact_tip").xpos[1] - width)
+        width = (data.site("hand_wide_contact_tip").xpos[1]
+                 - data.site("hand_narrow_contact_tip").xpos[1])
+        angle = data.qpos[model.joint("hand_narrow1_joint").qposadr[0]]
+        tcp_offset = (data.site("hand_narrow_contact_tip").xpos
+                      + data.site("hand_wide_contact_tip").xpos) / 2
+        return width, float(angle), tcp_offset
 
-    control = brentq(opening_error, 0.0, 1.0, xtol=1e-5)
-    opening_error(control)
-    angle = data.qpos[model.joint("hand_narrow1_joint").qposadr[0]]
-    tcp_offset = (data.site("hand_narrow_contact_tip").xpos
-                  + data.site("hand_wide_contact_tip").xpos) / 2
-    return float(angle), control, tcp_offset
+    return response
+
+
+def grasp_width_to_joint_angle(width):
+    """宽度（米）对应的驱动角度（弧度）、开合指令及指尖中心偏移。"""
+    from scipy.optimize import brentq
+
+    response = _gripper_response()
+    control = brentq(lambda value: response(value)[0] - width, 0.0, 1.0, xtol=1e-5)
+    _, angle, tcp_offset = response(control)
+    return angle, control, tcp_offset.copy()
 
 
 @contextmanager
@@ -105,11 +116,18 @@ def infer(input_path, output_path):
         )
 
 
-def generate_grasps(model, data, frame, *, full_scene=False):
+def generate_grasps(model, data, frame, *, full_scene=False, workspace_bounds=None,
+                    convert_first=True):
     # 完整点云按锤柄和锤头颜色定位裁剪；相机点云沿用锤柄附近 0.30 米的工作空间。
     points, colors = frame["points"], frame["colors"]
-    handle = data.geom("hammer_handle")
-    if full_scene:
+    if workspace_bounds is not None:
+        lower, upper = np.asarray(workspace_bounds)
+        workspace = np.all((frame["world_points"] >= lower)
+                           & (frame["world_points"] <= upper), axis=1)
+        corners = np.array(np.meshgrid(*zip(lower, upper))).reshape(3, -1).T
+        camera_corners = (corners - frame["camera_pos"]) @ frame["camera_rot"]
+        lims = np.column_stack((camera_corners.min(0), camera_corners.max(0))).ravel()
+    elif full_scene:
         hammer = (np.all(np.isclose(colors, [0.60, 0.39, 0.23]), axis=1)
                   | np.all(np.isclose(colors, [0.40, 0.40, 0.40]), axis=1))
         hammer_points = frame["world_points"][hammer]
@@ -117,14 +135,17 @@ def generate_grasps(model, data, frame, *, full_scene=False):
         workspace = np.all((frame["world_points"] >= lower)
                            & (frame["world_points"] <= upper), axis=1)
     else:
+        handle = data.geom("hammer_handle")
         workspace = np.linalg.norm(frame["world_points"] - handle.xpos, axis=1) < 0.30
     points, colors = points[workspace], colors[workspace]
     # 保留上下文点云，用相机坐标下锤柄外扩 0.02 米的包围盒限定抓取工作区。
-    center = (handle.xpos - frame["camera_pos"]) @ frame["camera_rot"]
-    axis = frame["camera_rot"].T @ handle.xmat.reshape(3, 3)[:, 2]
-    radius, half_length = model.geom("hammer_handle").size[:2]
-    extent = half_length * np.abs(axis) + radius + 0.02
-    lims = np.column_stack((center - extent, center + extent)).ravel()
+    if workspace_bounds is None:
+        handle = data.geom("hammer_handle")
+        center = (handle.xpos - frame["camera_pos"]) @ frame["camera_rot"]
+        axis = frame["camera_rot"].T @ handle.xmat.reshape(3, 3)[:, 2]
+        radius, half_length = model.geom("hammer_handle").size[:2]
+        extent = half_length * np.abs(axis) + radius + 0.02
+        lims = np.column_stack((center - extent, center + extent)).ravel()
 
     with TemporaryDirectory() as directory:
         input_path = Path(directory) / "cloud.npz"
@@ -145,8 +166,11 @@ def generate_grasps(model, data, frame, *, full_scene=False):
     # 返回的全部候选使用世界坐标；原始平移参考点不在这里叠加抓取深度。
     grasps["translations"] = grasps["translations"] @ frame["camera_rot"].T + frame["camera_pos"]
     grasps["rotations"] = frame["camera_rot"] @ grasps["rotations"]
-    i = 0
+    return grasps, candidate_to_mount(grasps, 0) if convert_first else None
 
+
+def candidate_to_mount(grasps, i):
+    """复用同一开度标定与 mount/TCP 转换；候选输入为世界坐标。"""
     _, gripper_open_ctrl, tcp_offset = grasp_width_to_joint_angle(grasps["widths"][i])
 
     grasp_rot = grasps["rotations"][i]
@@ -157,7 +181,7 @@ def generate_grasps(model, data, frame, *, full_scene=False):
     mount_pos += 0.03 * grasp_rot[:, 0] #新增，沿接近方向额外深入30mm
     pregrasp_pos = mount_pos - 0.10 * grasp_rot[:, 0]
 
-    return grasps, {
+    return {
         "pregrasp_pos": pregrasp_pos,
         "mount_pos": mount_pos,
         "mount_quat": mount_quat,

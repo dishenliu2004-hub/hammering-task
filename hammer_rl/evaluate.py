@@ -1,117 +1,117 @@
-"""运行原抓取到敲击流程；--episodes 指定顺序执行次数。
-
-conda activate hammer
-PYTHONDONTWRITEBYTECODE=1 MUJOCO_GL=glfw \
-python -m hammer_rl.evaluate \
---pointcloud full --noise --episodes 5 --hammer-head-extra-mass 0.1
-"""
+"""同一 scene/candidate、同一固定执行器的 zero / checkpoint 评估与 native 回放。"""
 
 import argparse
-from functools import partial
+from contextlib import nullcontext
+import json
+from pathlib import Path
 import time
 
-import matplotlib.pyplot as plt
-import mujoco.viewer
+import mujoco
 import numpy as np
-from scipy.spatial.transform import Rotation
+import torch
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
-from generation.grasp_hammer import generate_grasps
-from visualization.anygrasp_grasp_visualization import show_grasps
-from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
-from visualization.full_scene_pointcloud import FullScenePointCloud
-
-from .env_cfg import DT, make_env_cfg
-from .mdp.actions import hammer_strike, move_to
+from .env_cfg import make_env_cfg
 from .mdp.observations import sync_data
-
-
-def run_episode(env, *, pointcloud="camera", noise=False, keep_open=True):
-    env.reset()
-    model = env.sim.mj_model
-    data = mujoco.MjData(model)
-    sync_data(env, data)
-    full_scene = pointcloud == "full"
-    if not full_scene:
-        camera = CameraRGBPointCloud(model, noise=noise)
-    grasp_figure = None
-    try:
-        if full_scene:
-            plt.ion()
-            frame = FullScenePointCloud(model, noise=noise).capture(data)
-        else:
-            frame = camera.capture(data)
-            camera.update(frame)
-        grasps, pose = generate_grasps(model, data, frame, full_scene=full_scene)
-        grasp_figure = show_grasps(frame, grasps)
-        # 窗口保留抓取前的数据，运动期间仅处理鼠标和窗口事件。
-        process_events = grasp_figure.canvas.flush_events
-
-        with mujoco.viewer.launch_passive(model, data) as viewer:
-            move = partial(move_to, env, data, viewer, dt=DT, on_step=process_events)
-            mount_pos, mount_quat = pose["mount_pos"], pose["mount_quat"]
-            move(pose["pregrasp_pos"], mount_quat, 1.0, pose["gripper_open_ctrl"])
-            move(mount_pos, mount_quat, 0.6, pose["gripper_open_ctrl"])
-            move(mount_pos, mount_quat, 0.8, 1.0)
-
-            # 沿用原抓稳判断和抬升轨迹，不重新创建场景。
-            mocap_id = model.body_mocapid[model.body("gripper_mount").id]
-            mount_rot = Rotation.from_quat(mount_quat[[1, 2, 3, 0]])
-            hammer_pos = data.body("hammer_Object").xpos.copy()
-            grasp_relative = mount_rot.inv().apply(hammer_pos - data.mocap_pos[mocap_id])
-            move(mount_pos + [0, 0, 0.25], mount_quat, 0.8, 1.0)
-            lifted_relative = mount_rot.inv().apply(
-                data.body("hammer_Object").xpos - data.mocap_pos[mocap_id]
-            )
-            """if np.linalg.norm(lifted_relative - grasp_relative) > 0.04:
-                raise RuntimeError("锤子未抓稳，未执行敲击")"""
-
-            mount_body, hammer_body = data.body("gripper_base_link"), data.body("hammer_Object")
-            actual_mount_rot = Rotation.from_matrix(mount_body.xmat.reshape(3, 3))
-            actual_hammer_rot = Rotation.from_matrix(hammer_body.xmat.reshape(3, 3))
-            face_pos = hammer_body.xpos + actual_hammer_rot.apply([-0.24, 0, 0.04])
-            tip_offset = actual_mount_rot.inv().apply(face_pos - mount_body.xpos)
-            relative_rot = actual_mount_rot.inv() * actual_hammer_rot
-            target_site = data.site("cylinder_endface_force_frame")
-            impact_hammer_rot = (Rotation.from_matrix(target_site.xmat.reshape(3, 3))
-                                 * Rotation.from_euler("y", np.pi))
-            impact_mount_rot = impact_hammer_rot * relative_rot.inv()
-            impact_force = hammer_strike(
-                env, data,
-                target_site.xpos.copy(), tip_offset, impact_mount_rot.as_quat()[[3, 0, 1, 2]],
-                gripper_action=1.0, dt=DT, viewer=viewer, on_step=process_events,
-            )
-            print(f"挥击法向接触力峰值（含撞击及卸载）：{impact_force.swing_peak:.6f} N")
-            print(f"撤离法向接触力峰值：{impact_force.return_peak:.6f} N")
-            print(f"圆柱上表面撞击峰值：{impact_force.peak:.6f} N")
-            print(f"挥击开始时夹爪抓取中心到锤头中心距离：{impact_force.distance:.6f} m")
-            # 动作完成后继续保留初始画面，直到关闭 MuJoCo 窗口。
-            while keep_open and viewer.is_running():
-                process_events()
-                time.sleep(0.05)
-    finally:
-        if not full_scene:
-            camera.close()
-        plt.close(grasp_figure)
+from .rl_cfg import ppo_cfg
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pointcloud", choices=("camera", "full"), default="camera",
-                        help="AnyGrasp 点云来源：camera 相机视角，full 完整场景（默认 camera）")
-    parser.add_argument("--noise", action="store_true", help="为所选点云来源加噪（默认关闭）")
-    parser.add_argument("--episodes", type=int, default=1, help="顺序执行次数（默认 1）")
-    parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0,
-                        help="锤头额外增加的质量，单位 kg（默认 0）")
+    parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank.npz")
+    parser.add_argument("--split", choices=("train", "eval"), default="eval")
+    parser.add_argument("--policy", choices=("zero", "trained"), default="zero")
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--episodes", type=int, default=32)
+    parser.add_argument("--num-envs", type=int, default=16)
+    parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--viewer", choices=("native",))
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--noise", action="store_true")
+    parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
+    parser.add_argument("--output", type=Path, help="逐样本原始指标 npz，建议放在 weight/ 下")
     args = parser.parse_args()
-    log_config = mujoco.MjLogConfig.get()
-    log_config.logto_file = False
-    log_config.set()
-    env = ManagerBasedRlEnv(make_env_cfg(args.hammer_head_extra_mass), device="cuda:0")
+    stage = "teacher"
+    if args.policy == "trained":
+        saved = json.loads((args.checkpoint.parent / "run_config.json").read_text())
+        stage = saved["stage"]
+        args.hammer_head_extra_mass = saved["hammer_head_extra_mass"]
+    count = 1 if args.viewer else min(args.num_envs, args.episodes)
+    cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=stage,
+        num_envs=count, split=args.split, seed=args.seed, training=False)
+    # 对照默认使用相同名义物理参数；--noise 同时用于 zero/teacher/student。
+    cfg.randomize_physics = False
+    cfg.events.pop("physics", None)
+    cfg.visual_noise = args.noise
+    env = ManagerBasedRlEnv(cfg, device=args.device)
+    wrapper = RslRlVecEnvWrapper(env)
+    policy = None
     try:
-        for episode in range(args.episodes):
-            run_episode(env, pointcloud=args.pointcloud, noise=args.noise,
-                        keep_open=episode == args.episodes - 1)
+        if args.policy == "trained":
+            from dataclasses import asdict
+            runner = MjlabOnPolicyRunner(wrapper, asdict(ppo_cfg("teacher" if stage == "teacher" else "student")),
+                                         log_dir=None, device=args.device)
+            loaded = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
+            actor = loaded["student_state_dict"] if stage == "distill" else loaded["actor_state_dict"]
+            runner.alg.load({"actor_state_dict": actor}, {"actor": True}, strict=True)
+            policy = runner.get_inference_policy()
+        bank = env.hammer.bank
+        scene_ids = torch.nonzero(bank["split"] == (args.split == "eval")).flatten().cpu().tolist()
+        pairs = [(s, c) for s in scene_ids
+                 for c in range(int(bank["offsets"][s]), int(bank["offsets"][s + 1]))]
+        rows = []
+        model, data = env.sim.mj_model, mujoco.MjData(env.sim.mj_model)
+        if args.viewer:
+            from mujoco import viewer as mj_viewer
+            sync_data(env, data)
+            context = mj_viewer.launch_passive(model, data)
+        else:
+            context = nullcontext(None)
+        with context as viewer:
+            if viewer is not None:
+                def display(term):
+                    if term._substep % term.substeps == 0:
+                        start = time.monotonic()
+                        sync_data(env, data)
+                        viewer.sync()
+                        time.sleep(max(0.0, 0.02 - (time.monotonic() - start)))
+                env.action_manager.get_term("grasp").on_physics_step = display
+            for first in range(0, args.episodes, count):
+                selected = [pairs[i % len(pairs)] for i in range(first, first + count)]
+                scene, candidate = torch.tensor(selected, device=env.device).unbind(-1)
+                env.hammer.selection = (scene, candidate)
+                # 每批使用确定种子，使冻结观测噪声也可复现。
+                env.reset(seed=args.seed + first)
+                if viewer is not None:
+                    sync_data(env, data)
+                with torch.inference_mode():
+                    action = (torch.zeros((count, 6), device=env.device) if policy is None else
+                              policy(wrapper.get_observations()))
+                    # 自动 reset 会清空过程量；仅评估在最终子步克隆结果。
+                    term = env.action_manager.get_term("grasp")
+                    callback = term.on_physics_step
+                    captured = {}
+                    def capture(term):
+                        if callback is not None:
+                            callback(term)
+                        if term._substep == env.cfg.decimation:
+                            captured.update({key: value.clone() for key, value in term.values.items()})
+                    term.on_physics_step = capture
+                    _, reward, done, _ = wrapper.step(action)
+                    term.on_physics_step = callback
+                for i in range(min(count, args.episodes - first)):
+                    rows.append(dict(scene_id=selected[i][0], candidate_id=selected[i][1],
+                        reward=float(reward[i]), **{key: float(value[i]) for key, value in captured.items()}))
+        for name in rows[0]:
+            if name in ("scene_id", "candidate_id"):
+                continue
+            values = np.array([row[name] for row in rows])
+            print(f"{name}: mean={values.mean():.6f}, p50={np.median(values):.6f}, p90={np.quantile(values, .9):.6f}, max={values.max():.6f}")
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(args.output, **{name: np.array([row[name] for row in rows]) for name in rows[0]})
     finally:
         env.close()
 

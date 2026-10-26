@@ -1,1 +1,5 @@
-"""预留强化学习终止条件；原抓稳判断保留在执行流程中。"""
+"""每个环境 step 是一次完整尝试，正常 terminal，不跨尝试 bootstrap。"""
+
+
+def attempt_complete(env):
+    return env.episode_length_buf >= 1
