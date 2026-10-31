@@ -48,10 +48,11 @@ def sampled_progress(substep, duration, substeps, quintic=False):
     return smooth(u0) + fraction * (smooth(u1) - smooth(u0))
 
 
+"""控制6维残差抓取位姿的运动空间的调整范围"""
 @dataclass(kw_only=True)
 class GraspResidualActionCfg(ActionTermCfg):
-    position_scale: float = 0.02
-    rotation_scale: float = math.pi / 16
+    position_scale: float = 0.05
+    rotation_scale: float = math.pi / 30
     unload_time: float = 1.0
 
     def build(self, env):
@@ -106,6 +107,8 @@ class GraspResidualAction(ActionTerm):
             "valid_strike", "lift_height", "grasp_before_swing", "grip_distance",
             "seat_closure", "seat_lift", "seat_before_swing")}
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
+        self.dropped = torch.zeros_like(self.grasp_valid)
+        self.lost_contact_steps = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.impact_started = torch.zeros_like(self.grasp_valid)
         self.finished = torch.zeros_like(self.grasp_valid)
         self.returning = torch.zeros_like(self.grasp_valid)
@@ -126,7 +129,8 @@ class GraspResidualAction(ActionTerm):
         self._raw_action[env_ids] = 0
         for value in self.values.values():
             value[env_ids] = 0
-        for value in (self.grasp_valid, self.impact_started, self.finished, self.returning,
+        for value in (self.grasp_valid, self.dropped, self.lost_contact_steps,
+                      self.impact_started, self.finished, self.returning,
                       self.unloaded, self.return_start, self.palm_frames, self.seat_frames, self.closure_enclosure):
             value[env_ids] = 0
         # 不清除 reset 事件刚写入的 sample/seed，也不推进其他环境的调度时钟。
@@ -263,7 +267,7 @@ class GraspResidualAction(ActionTerm):
         # 一次策略动作执行整次尝试；这里按阶段计算评分，写入逐环境的 values 缓存。
         # rewards.score() 在环境计算奖励时读取缓存；本方法不直接加权求和。
         # env_cfg.py 中当前设置：R = wrap + orientation + distance + 2*stability + 4*force。
-        # wrap 沿用 ICRA-BUILD 的有符号评分；其他 values 项用于判据或日志，不单独加入奖励。
+        # wrap 为 ICRA-BUILD 的有符号评分加顶靠奖励；其他 values 项用于判据或日志，不单独加入奖励。
         # reset() 会清零评分和状态，因此未满足条件的尝试不会沿用上一回合的结果。
         k, data, values = self._substep, self._env.sim.data, self.values
         if k in (self.closure_end, self.lift_end, self.swing_start):
@@ -289,16 +293,23 @@ class GraspResidualAction(ActionTerm):
                 self.seat_frames.copy_(torch.where(seated, self.seat_frames + 1, 0))
                 if k == end:
                     values[name].copy_(self.seat_frames >= 5)
-        if k == self.lift_end:
-            # A 快照：抬升结束（当前为尝试开始后约 3.2 s）。前三项奖励在此时写入，
-            # wrap 在挥击前复核顶靠；保存夹爪系下的锤子位姿，用于之后评价抓持稳定性。
-            self.relative_a_pos, self.relative_a_quat = (value.clone() for value in self._relative_pose())
+        if self.lift_end <= k <= self.swing_start:
             contact = self._env.scene.sensors["handle_contact"].data
             # handle_contact 只检测六个指面与锤柄的接触，每个指面最多保留两个接触槽。
             # 12 个槽中前 6 个属于 narrow 侧，后 6 个属于 wide 侧；槽内有接触且法向力 > 0
             # 才算有效。双侧各至少一个有效接触，才能通过 bilateral 判据。
             valid = (contact.found > 0) & (contact.force[:, :, 0] > 0)
             bilateral = valid[:, :6].any(-1) & valid[:, 6:].any(-1)
+            if k > self.lift_end:
+                # 成功抬升后逐子步检测到挥击起点；连续失联 20 ms 后本回合永久失效。
+                # 接触恢复只清零计数，不恢复资格；开始执行挥击后停止检测。
+                lost = (values["lift_success"] > 0) & ~bilateral
+                self.lost_contact_steps.copy_(torch.where(lost, self.lost_contact_steps + 1, 0))
+                self.dropped |= self.lost_contact_steps >= self.substeps
+        if k == self.lift_end:
+            # A 快照：抬升结束（当前为尝试开始后约 3.2 s）。前三项奖励在此时写入，
+            # wrap 在挥击前追加顶靠奖励；保存夹爪系下的锤子位姿，用于之后评价抓持稳定性。
+            self.relative_a_pos, self.relative_a_quat = (value.clone() for value in self._relative_pose())
             initial = self.task.bank["hammer_pos"][self.task.scene_id, 2]
             values["lift_height"].copy_(data.xpos[:, self.hammer, 2] - initial)
             # 有效抬升 lift：锤子相对本场景初态的真实高度增量 >= lift_threshold，且双侧接触。
@@ -307,9 +318,9 @@ class GraspResidualAction(ActionTerm):
             lift = (values["lift_height"] >= self._env.cfg.lift_threshold) & bilateral
             values["lift_success"].copy_(lift)
 
-            # 1. 包覆奖励：原真包络角度评分，乘抬升成功及闭合/抬升顶靠门控。
-            values["wrap"].copy_(torch.where(lift, self.closure_enclosure, 0)
-                                 * values["seat_closure"] * values["seat_lift"])
+            # 1. 包覆奖励：抬升成功后，原真包络角度评分加闭合/抬升顶靠奖励。
+            values["wrap"].copy_(torch.where(lift, self.closure_enclosure
+                                 + 0.10 * values["seat_closure"] + 0.15 * values["seat_lift"], 0))
 
             # 2. 朝向奖励 orientation：axis 为从 narrow 指尖指向 wide 指尖的单位向量，
             # normal 为锤体局部 +Z（敲击面法向）旋转到世界系后的单位向量。
@@ -330,14 +341,12 @@ class GraspResidualAction(ActionTerm):
             # 按 A 快照规划后续固定挥击轨迹，同时准备后面投影接触力所需的目标端面法向。
             self._plan_strike()
         if k == self.swing_start:
-            values["wrap"].mul_(values["seat_before_swing"])
+            values["wrap"].add_(0.25 * values["lift_success"] * values["seat_before_swing"])
             # B 快照：搬运和预备姿态调整结束、即将挥击（当前约 16.2 s）。
-            # grasp_valid 要求 A 时刻已有效抬升，且 B 时刻两侧仍各有有效接触；
+            # grasp_valid 要求 A 时刻已有效抬升、途中未锁存掉落，且 B 时刻仍有双侧有效接触；
             # 它在此锁存，供稳定奖励及之后的敲击力累计使用，不在挥击中重新判断双侧接触。
             p, q = self._relative_pose()
-            contact = self._env.scene.sensors["handle_contact"].data
-            valid = (contact.found > 0) & (contact.force[:, :, 0] > 0)
-            self.grasp_valid.copy_((values["lift_success"] > 0) & valid[:, :6].any(-1) & valid[:, 6:].any(-1))
+            self.grasp_valid.copy_((values["lift_success"] > 0) & bilateral & ~self.dropped)
             values["grasp_before_swing"].copy_(self.grasp_valid)
 
             # 4. 稳定奖励 stability：比较 A/B 两时刻夹爪坐标系下的锤子相对位姿，
@@ -347,11 +356,12 @@ class GraspResidualAction(ActionTerm):
             er = quat_error_magnitude(self.relative_a_quat, q)
             values["translation_drift"].copy_(ep)
             values["rotation_drift"].copy_(er)
-            # stability = exp(-(ep/sp)^2 - (er/sr)^2) * grasp_valid。
-            # 当前 sp=0.01 m、sr=pi/36（5°）；无漂移得 1，单独漂移 1 cm 或 5° 得 exp(-1)。
-            # 尺度越小，对滑移越敏感；无有效抓持时为 0。本项在 B 时刻计算一次。
-            values["stability"].copy_(torch.exp(-(ep / self._env.cfg.stability_position_scale)**2
-                - (er / self._env.cfg.stability_rotation_scale)**2) * self.grasp_valid)
+            # x 为以 5 mm、5° 归一化后的综合误差；stability = 252/(252+48x-43x²+23x³)。
+            # 平移/旋转同时为 5 mm/5°、10 mm/10°、15 mm/15° 时，分别得 0.9、0.7、0.4。
+            # 无有效抓持时为 0。本项在 B 时刻计算一次。
+            x = torch.sqrt(0.5 * ((ep / 0.005).square() + (er / (math.pi / 36)).square()))
+            denominator = 252.0 + x * (48.0 + x * (-43.0 + 23.0 * x))
+            values["stability"].copy_((252.0 / denominator) * self.grasp_valid)
         if self.swing_start < k <= self.unload_end:
             # 5. 敲击力奖励 force：在挥击开始后至卸载时窗结束之间，逐物理子步维护峰值。
             # head_contact 仅匹配锤头与目标端盖；netforce 给出这些接触的世界系合力。
@@ -375,8 +385,7 @@ class GraspResidualAction(ActionTerm):
             self.unloaded = torch.where(data.sensordata[:, self.touch_address] == 0, self.unloaded + 1, 0)
             self.finished |= (k > self.swing_end) & self.impact_started & (self.unloaded >= 3) & ~touching
             values["valid_strike"].copy_(self.impact_started)
-            # force = F_peak / (F_peak + force_scale)；当前 force_scale=100 N。
-            # 0 N 得 0、100 N 得 0.5、300 N 得 0.75；力越大越接近 1，且边际增益递减。
+            # force = F_peak / (F_peak + force_scale)；当前 force_scale=60 N。
             # force_scale 是归一化尺度，不是命中阈值；无有效抓持时峰值保持 0，评分也为 0。
             values["force"].copy_(values["peak_force"] / (values["peak_force"] + self._env.cfg.force_scale))
         if k > self.swing_end:

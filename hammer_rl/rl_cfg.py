@@ -6,7 +6,7 @@ from mjlab.rl import RslRlOnPolicyRunnerCfg, RslRlModelCfg, RslRlPpoAlgorithmCfg
 
 
 def teacher_model():
-    return RslRlModelCfg(hidden_dims=(256, 128, 64), activation="elu", obs_normalization=True,
+    return RslRlModelCfg(hidden_dims=(512, 256, 128), activation="elu", obs_normalization=True,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 0.3, "std_type": "scalar"})
 
 
@@ -20,7 +20,7 @@ def student_model():
 
 
 def ppo_cfg(stage="teacher"):
-    return RslRlOnPolicyRunnerCfg(num_steps_per_env=1, max_iterations=3000, save_interval=50,
+    return RslRlOnPolicyRunnerCfg(num_steps_per_env=1, max_iterations=5000, save_interval=100,
         experiment_name=stage, logger="tensorboard", upload_model=False,
         actor=teacher_model() if stage == "teacher" else student_model(),
         critic=RslRlModelCfg(hidden_dims=(256, 128, 64), activation="elu", obs_normalization=True),

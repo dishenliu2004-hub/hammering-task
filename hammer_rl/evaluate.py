@@ -21,9 +21,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank.npz")
     parser.add_argument("--split", choices=("train", "eval"), default="eval")
+    parser.add_argument("--placement", choices=("all", "flat", "lean_head_down", "lean_head_up", "inverted"),
+                        default="all", help="只评估指定初始摆放")
     parser.add_argument("--policy", choices=("zero", "trained"), default="zero")
     parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--episodes", type=int, default=32)
+    parser.add_argument("--episodes", type=int, default=32, help="评估次数；0 表示所有选定候选各一次")
     parser.add_argument("--num-envs", type=int, default=16)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--viewer", choices=("native",))
@@ -33,6 +35,21 @@ def main():
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
     parser.add_argument("--output", type=Path, help="逐样本原始指标 npz，建议放在 weight/ 下")
     args = parser.parse_args()
+    if args.episodes < 0 or args.num_envs < 1:
+        parser.error("episodes 必须非负，num-envs 必须为正")
+    if args.policy == "trained" and args.checkpoint is None:
+        parser.error("trained 策略需要 --checkpoint")
+    with np.load(args.data_file) as source:
+        mask = source["split"] == (args.split == "eval")
+        if args.placement != "all":
+            placement = ("flat", "lean_head_down", "lean_head_up", "inverted").index(args.placement)
+            mask &= source["placement"] == placement
+        pairs = [(int(s), c) for s in np.flatnonzero(mask)
+                 for c in range(int(source["offsets"][s]), int(source["offsets"][s + 1]))]
+    if not pairs:
+        parser.error("指定划分和摆放下没有抓取候选")
+    if args.episodes == 0:
+        args.episodes = len(pairs)
     stage = "teacher"
     if args.policy == "trained":
         saved = json.loads((args.checkpoint.parent / "run_config.json").read_text())
@@ -57,10 +74,9 @@ def main():
             actor = loaded["student_state_dict"] if stage == "distill" else loaded["actor_state_dict"]
             runner.alg.load({"actor_state_dict": actor}, {"actor": True}, strict=True)
             policy = runner.get_inference_policy()
-        bank = env.hammer.bank
-        scene_ids = torch.nonzero(bank["split"] == (args.split == "eval")).flatten().cpu().tolist()
-        pairs = [(s, c) for s in scene_ids
-                 for c in range(int(bank["offsets"][s]), int(bank["offsets"][s + 1]))]
+        print(f"Evaluation: policy={args.policy}, placement={args.placement}, "
+              f"scenes={len(set(s for s, _ in pairs))}, candidates={len(pairs)}, "
+              f"episodes={args.episodes}", flush=True)
         rows = []
         model, data = env.sim.mj_model, mujoco.MjData(env.sim.mj_model)
         if args.viewer:
@@ -86,7 +102,8 @@ def main():
                 env.reset(seed=args.seed + first)
                 if viewer is not None:
                     sync_data(env, data)
-                with torch.inference_mode():
+                # 环境会保留本批生成的状态张量，供下一批在上下文外 reset。
+                with torch.no_grad():
                     action = (torch.zeros((count, 6), device=env.device) if policy is None else
                               policy(wrapper.get_observations()))
                     # 自动 reset 会清空过程量；仅评估在最终子步克隆结果。
@@ -104,6 +121,7 @@ def main():
                 for i in range(min(count, args.episodes - first)):
                     rows.append(dict(scene_id=selected[i][0], candidate_id=selected[i][1],
                         reward=float(reward[i]), **{key: float(value[i]) for key, value in captured.items()}))
+                print(f"Evaluated {len(rows)}/{args.episodes} episodes", flush=True)
         for name in rows[0]:
             if name in ("scene_id", "candidate_id"):
                 continue

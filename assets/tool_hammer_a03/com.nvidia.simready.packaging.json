@@ -1,0 +1,19 @@
+{
+  "format_version": "1.0",
+  "package_id": "simready.hf.nvidia.simready-assets.tool_hammer_a03.2026.10.09_181420857332",
+  "license": "CC-BY-4.0",
+  "metadata": [
+    {
+      "name": "com.nvidia.simready.packaging.bom.json",
+      "hash": {
+        "sha256": "b0ae1045783d261e6a5e68d72d24c77e3403aebdf0d5b93f70ab1910dd739a90"
+      }
+    }
+  ],
+  "content_hash": {
+    "sha256": "07cfea00837837c817489b340dbb37b4284b3fd5723576adcb3affe19ffa7e26"
+  },
+  "package_hash": {
+    "sha256": "0536dc3cc64cf5dc52ad518de9a63d33ebeb614d40a223ca7918443aeab291ed"
+  }
+}

@@ -16,6 +16,15 @@ from .env_cfg import make_env_cfg
 from .rl_cfg import ppo_cfg, distill_cfg
 
 
+class _RewardLogVecEnvWrapper(RslRlVecEnvWrapper):
+    def step(self, actions):
+        obs, reward, done, extras = super().step(actions)
+        # 直接记录加权评分，不按回合时长归一化。
+        for name, term in self.cfg.rewards.items():
+            extras["log"][f"Episode_Reward/{name}"] = extras["log"][f"Episode_Metrics/{name}"] * term.weight
+        return obs, reward, done, extras
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=("teacher", "distill", "student"), required=True)
@@ -49,7 +58,7 @@ def main():
     (run_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     env_cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=args.stage,
         num_envs=args.num_envs, seed=args.seed, curriculum_milestones=args.curriculum_milestones)
-    env = RslRlVecEnvWrapper(ManagerBasedRlEnv(env_cfg, device=args.device))
+    env = _RewardLogVecEnvWrapper(ManagerBasedRlEnv(env_cfg, device=args.device))
     train_cfg = config["rl"]
     train_cfg["check_for_nan"] = False
     runner_type = DistillationRunner if args.stage == "distill" else MjlabOnPolicyRunner

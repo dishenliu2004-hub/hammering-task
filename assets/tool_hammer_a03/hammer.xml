@@ -1,0 +1,83 @@
+<!--
+MUJOCO_GL=glfw /home/ubuntu20/anaconda3/envs/hammer/bin/python - <<'PY'
+import mujoco
+import mujoco.viewer
+
+model = mujoco.MjModel.from_xml_path(
+    "/home/ubuntu20/CodeMujoco/hammering-task/assets/tool_hammer_a03/hammer.xml"
+)
+model.opt.gravity[:] = 0
+mujoco.viewer.launch(model)
+PY
+-->
+<mujoco model="tool_hammer_a03">
+  <default>
+    <default class="hammer_visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="hammer_collision">
+      <geom type="mesh" contype="1" conaffinity="1" group="3"
+            friction="0.5 0.005 0.0001"/>
+      <default class="hammer_head_collision">
+        <geom friction="0.3 0.005 0.0001"/>
+      </default>
+    </default>
+  </default>
+
+  <asset>
+    <texture name="hammer_albedo" type="2d"
+             file="simready_usd/Textures/t_tool_hammer_a03_alb.png"/>
+    <material name="hammer_material" texture="hammer_albedo"/>
+    <mesh name="hammer_handle" file="meshes/handle.obj"/>
+    <mesh name="hammer_head" file="meshes/head.obj"/>
+    <mesh name="hammer_handle001" file="meshes/collision/handle001.obj"/>
+    <mesh name="hammer_handle002" file="meshes/collision/handle002.obj"/>
+    <mesh name="hammer_handle003" file="meshes/collision/handle003.obj"/>
+    <mesh name="hammer_handle004" file="meshes/collision/handle004.obj"/>
+    <mesh name="hammer_head001" file="meshes/collision/head001.obj"/>
+    <mesh name="hammer_head002" file="meshes/collision/head002.obj"/>
+    <mesh name="hammer_head003" file="meshes/collision/head003.obj"/>
+    <mesh name="hammer_head004" file="meshes/collision/head004.obj"/>
+    <mesh name="hammer_head005" file="meshes/collision/head005.obj"/>
+    <mesh name="hammer_head006" file="meshes/collision/head006.obj"/>
+    <mesh name="hammer_head007" file="meshes/collision/head007.obj"/>
+    <mesh name="hammer_head008" file="meshes/collision/head008.obj"/>
+    <mesh name="hammer_head009" file="meshes/collision/head009.obj"/>
+    <mesh name="hammer_head010" file="meshes/collision/head010.obj"/>
+    <mesh name="hammer_head011" file="meshes/collision/head011.obj"/>
+    <mesh name="hammer_head012" file="meshes/collision/head012.obj"/>
+    <mesh name="hammer_head013" file="meshes/collision/head013.obj"/>
+    <mesh name="hammer_head014" file="meshes/collision/head014.obj"/>
+  </asset>
+
+  <worldbody>
+    <body name="Object">
+      <freejoint name="hammer_free"/>
+      <inertial pos="0.0836427 0.0037970217 0.013157003"
+                mass="0.5670844"
+                diaginertia="0.00035758835 0.004693563 0.0049848026"/>
+      <geom name="handle_visual" class="hammer_visual"
+            mesh="hammer_handle" material="hammer_material"/>
+      <geom name="head_visual" class="hammer_visual"
+            mesh="hammer_head" material="hammer_material"/>
+      <geom name="handle001" class="hammer_collision" mesh="hammer_handle001"/>
+      <geom name="handle002" class="hammer_collision" mesh="hammer_handle002"/>
+      <geom name="handle003" class="hammer_collision" mesh="hammer_handle003"/>
+      <geom name="handle004" class="hammer_collision" mesh="hammer_handle004"/>
+      <geom name="head001" class="hammer_head_collision" mesh="hammer_head001"/>
+      <geom name="head002" class="hammer_head_collision" mesh="hammer_head002"/>
+      <geom name="head003" class="hammer_head_collision" mesh="hammer_head003"/>
+      <geom name="head004" class="hammer_head_collision" mesh="hammer_head004"/>
+      <geom name="head005" class="hammer_head_collision" mesh="hammer_head005"/>
+      <geom name="head006" class="hammer_head_collision" mesh="hammer_head006"/>
+      <geom name="head007" class="hammer_head_collision" mesh="hammer_head007"/>
+      <geom name="head008" class="hammer_head_collision" mesh="hammer_head008"/>
+      <geom name="head009" class="hammer_head_collision" mesh="hammer_head009"/>
+      <geom name="head010" class="hammer_head_collision" mesh="hammer_head010"/>
+      <geom name="head011" class="hammer_head_collision" mesh="hammer_head011"/>
+      <geom name="head012" class="hammer_head_collision" mesh="hammer_head012"/>
+      <geom name="head013" class="hammer_head_collision" mesh="hammer_head013"/>
+      <geom name="head014" class="hammer_head_collision" mesh="hammer_head014"/>
+    </body>
+  </worldbody>
+</mujoco>
