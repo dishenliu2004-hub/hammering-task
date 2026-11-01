@@ -102,13 +102,15 @@ class GraspResidualAction(ActionTerm):
         self.on_physics_step = None  # 仅评估安装，训练路径没有 CPU 同步。
         self._substep = 0
         self.values = {name: torch.zeros(env.num_envs, device=self.device) for name in (
-            "lift_success", "wrap", "orientation", "distance", "stability", "force",
+            "capture", "lift_progress", "lift_success", "wrap", "orientation", "distance", "stability", "force",
+            "impact_impulse", "task_success", "drop",
             "translation_drift", "rotation_drift", "peak_force", "touch_peak", "return_touch_peak",
             "valid_strike", "lift_height", "grasp_before_swing", "grip_distance",
             "seat_closure", "seat_lift", "seat_before_swing")}
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         self.dropped = torch.zeros_like(self.grasp_valid)
         self.lost_contact_steps = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
+        self.first_hit_step = torch.zeros_like(self.lost_contact_steps)
         self.impact_started = torch.zeros_like(self.grasp_valid)
         self.finished = torch.zeros_like(self.grasp_valid)
         self.returning = torch.zeros_like(self.grasp_valid)
@@ -130,6 +132,7 @@ class GraspResidualAction(ActionTerm):
         for value in self.values.values():
             value[env_ids] = 0
         for value in (self.grasp_valid, self.dropped, self.lost_contact_steps,
+                      self.first_hit_step,
                       self.impact_started, self.finished, self.returning,
                       self.unloaded, self.return_start, self.palm_frames, self.seat_frames, self.closure_enclosure):
             value[env_ids] = 0
@@ -266,8 +269,7 @@ class GraspResidualAction(ActionTerm):
         # collect_attempt() 通过 per_substep metric 在每个物理子步后调用本方法。
         # 一次策略动作执行整次尝试；这里按阶段计算评分，写入逐环境的 values 缓存。
         # rewards.score() 在环境计算奖励时读取缓存；本方法不直接加权求和。
-        # env_cfg.py 中当前设置：R = wrap + orientation + distance + 2*stability + 4*force。
-        # wrap 为 ICRA-BUILD 的有符号评分加顶靠奖励；其他 values 项用于判据或日志，不单独加入奖励。
+        # 各项权重由 env_cfg.py 注册；事件每次尝试只计一次，物理子步只更新评分缓存。
         # reset() 会清零评分和状态，因此未满足条件的尝试不会沿用上一回合的结果。
         k, data, values = self._substep, self._env.sim.data, self.values
         if k in (self.closure_end, self.lift_end, self.swing_start):
@@ -293,90 +295,93 @@ class GraspResidualAction(ActionTerm):
                 self.seat_frames.copy_(torch.where(seated, self.seat_frames + 1, 0))
                 if k == end:
                     values[name].copy_(self.seat_frames >= 5)
-        if self.lift_end <= k <= self.swing_start:
+        if k == self.closure_end or self.lift_end <= k <= self.unload_end:
             contact = self._env.scene.sensors["handle_contact"].data
             # handle_contact 只检测六个指面与锤柄的接触，每个指面最多保留两个接触槽。
             # 12 个槽中前 6 个属于 narrow 侧，后 6 个属于 wide 侧；槽内有接触且法向力 > 0
             # 才算有效。双侧各至少一个有效接触，才能通过 bilateral 判据。
             valid = (contact.found > 0) & (contact.force[:, :, 0] > 0)
-            bilateral = valid[:, :6].any(-1) & valid[:, 6:].any(-1)
+            left, right = valid[:, :6].any(-1), valid[:, 6:].any(-1)
+            bilateral = left & right
+            if k == self.closure_end:
+                values["capture"].copy_((left.float() + right.float()) / 2)
             if k > self.lift_end:
-                # 成功抬升后逐子步检测到挥击起点；连续失联 20 ms 后本回合永久失效。
-                # 接触恢复只清零计数，不恢复资格；开始执行挥击后停止检测。
+                # A 之后持续评价到卸载结束；进入撤离后冻结，连续失联 20 ms 锁存掉落。
+                evaluating = ~self.returning
                 lost = (values["lift_success"] > 0) & ~bilateral
-                self.lost_contact_steps.copy_(torch.where(lost, self.lost_contact_steps + 1, 0))
-                self.dropped |= self.lost_contact_steps >= self.substeps
+                self.lost_contact_steps.copy_(torch.where(evaluating,
+                    torch.where(lost, self.lost_contact_steps + 1, 0), self.lost_contact_steps))
+                self.dropped |= evaluating & (self.lost_contact_steps >= self.substeps)
+                values["drop"].copy_(self.dropped)
         if k == self.lift_end:
-            # A 快照：抬升结束（当前为尝试开始后约 3.2 s）。前三项奖励在此时写入，
+            # A 快照：抬升结束（当前为尝试开始后约 3.2 s）。抬升和几何评分在此时写入，
             # wrap 在挥击前追加顶靠奖励；保存夹爪系下的锤子位姿，用于之后评价抓持稳定性。
             self.relative_a_pos, self.relative_a_quat = (value.clone() for value in self._relative_pose())
             initial = self.task.bank["hammer_pos"][self.task.scene_id, 2]
             values["lift_height"].copy_(data.xpos[:, self.hammer, 2] - initial)
             # 有效抬升 lift：锤子相对本场景初态的真实高度增量 >= lift_threshold，且双侧接触。
             # lift_threshold 当前为 0.15 m；lift_success 是 0/1 日志值，也作为奖励的有效性门控。
-            # 抬升失败时 wrap、orientation、distance 均为 0，没有额外的失败扣分。
+            # 抬升失败时几何分为零；有双侧接触时仍可获得部分抬升进展分。
             lift = (values["lift_height"] >= self._env.cfg.lift_threshold) & bilateral
             values["lift_success"].copy_(lift)
+            values["lift_progress"].copy_((values["lift_height"] / self._env.cfg.lift_threshold).clamp(0, 1) * bilateral)
 
             # 1. 包覆奖励：抬升成功后，原真包络角度评分加闭合/抬升顶靠奖励。
             values["wrap"].copy_(torch.where(lift, self.closure_enclosure
-                                 + 0.10 * values["seat_closure"] + 0.15 * values["seat_lift"], 0))
+                                 + 0.10 * values["seat_closure"] + 0.15 * values["seat_lift"], 0) / 1.5)
 
-            # 2. 朝向奖励 orientation：axis 为从 narrow 指尖指向 wide 指尖的单位向量，
-            # normal 为锤体局部 +Z（敲击面法向）旋转到世界系后的单位向量。
-            # orientation = max(axis·normal, 0) * lift；同向平行得 1，垂直或反平行得 0。
+            # 横向夹柄；平放样本另按最终抓姿的接近轴评价双向侧抓偏好。
             axis = torch.nn.functional.normalize(data.site_xpos[:, self.wide] - data.site_xpos[:, self.narrow], dim=-1)
-            normal = quat_apply(data.xquat[:, self.hammer], self.unit[:, 2])
-            values["orientation"].copy_((axis * normal).sum(-1).clamp_min(0) * lift)
+            handle_axis = quat_apply(data.xquat[:, self.hammer], self.unit[:, 0])
+            transverse = (1 - (axis * handle_axis).sum(-1).square()).clamp(0, 1)
+            initial_axis = quat_apply(self.task.bank["hammer_quat"][self.task.scene_id], self.unit[:, 0])
+            side = torch.nn.functional.normalize(torch.cross(self.unit[:, 2], initial_axis, dim=-1), dim=-1)
+            approach = quat_apply(self.final_quat, self.unit[:, 2])
+            side_score = (approach * side).sum(-1).square().clamp(0, 1)
+            flat = self.task.bank["placement"][self.task.scene_id] == 0
+            values["orientation"].copy_(torch.where(flat, 0.4 * transverse + 0.6 * side_score, transverse) * lift)
 
-            # 3. 距离奖励 distance：抓取中心取两指尖中点；锤头中心位于锤体原点沿局部 -X
-            # 方向 0.24 m 处。d 是两者的三维欧氏距离，grip_distance 保存其原始米制值。
-            # distance = clamp(d / distance_ref, 0, 1) * lift：有效抬升后，抓得离锤头越远
-            # 分数越高，达到参考距离后饱和。distance_ref 当前为 0.315 m，取一半时得 0.5。
+            # 沿柄轴投影评分；grip_distance 仍保存三维欧氏距离诊断，单位 m。
             center = (data.site_xpos[:, self.wide] + data.site_xpos[:, self.narrow]) / 2
-            head = data.xpos[:, self.hammer] - 0.24 * quat_apply(data.xquat[:, self.hammer], self.unit[:, 0])
-            distance = (center - head).norm(dim=-1)
-            values["grip_distance"].copy_(distance)
+            head = data.xpos[:, self.hammer] - 0.24 * handle_axis
+            values["grip_distance"].copy_((center - head).norm(dim=-1))
+            distance = ((center - head) * handle_axis).sum(-1)
             values["distance"].copy_((distance / self._env.cfg.distance_ref).clamp(0, 1) * lift)
             # 按 A 快照规划后续固定挥击轨迹，同时准备后面投影接触力所需的目标端面法向。
             self._plan_strike()
         if k == self.swing_start:
-            values["wrap"].add_(0.25 * values["lift_success"] * values["seat_before_swing"])
             # B 快照：搬运和预备姿态调整结束、即将挥击（当前约 16.2 s）。
             # grasp_valid 要求 A 时刻已有效抬升、途中未锁存掉落，且 B 时刻仍有双侧有效接触；
-            # 它在此锁存，供稳定奖励及之后的敲击力累计使用，不在挥击中重新判断双侧接触。
-            p, q = self._relative_pose()
+            # 它在此锁存并保留原控制含义；挥击中的实时保持条件仅用于评分。
             self.grasp_valid.copy_((values["lift_success"] > 0) & bilateral & ~self.dropped)
             values["grasp_before_swing"].copy_(self.grasp_valid)
+            values["wrap"].add_(0.25 * self.grasp_valid * values["seat_before_swing"] / 1.5)
 
-            # 4. 稳定奖励 stability：比较 A/B 两时刻夹爪坐标系下的锤子相对位姿，
-            # 因而共同搬运、转动不会直接算作漂移。ep 为相对平移差的模（m），
-            # er 为两个相对姿态的旋转角误差（rad），不是四元数各分量的差。
+        if self.lift_end < k <= self.unload_end:
+            # 从 A 基准累计最大相对漂移；本帧提前卸载结束仍评分，撤离后冻结。
+            p, q = self._relative_pose()
             ep = (p - self.relative_a_pos).norm(dim=-1)
             er = quat_error_magnitude(self.relative_a_quat, q)
-            values["translation_drift"].copy_(ep)
-            values["rotation_drift"].copy_(er)
-            # x 为以 5 mm、5° 归一化后的综合误差；stability = 252/(252+48x-43x²+23x³)。
-            # 平移/旋转同时为 5 mm/5°、10 mm/10°、15 mm/15° 时，分别得 0.9、0.7、0.4。
-            # 无有效抓持时为 0。本项在 B 时刻计算一次。
-            x = torch.sqrt(0.5 * ((ep / 0.005).square() + (er / (math.pi / 36)).square()))
-            denominator = 252.0 + x * (48.0 + x * (-43.0 + 23.0 * x))
-            values["stability"].copy_((252.0 / denominator) * self.grasp_valid)
+            values["translation_drift"].copy_(torch.where(evaluating, torch.maximum(values["translation_drift"], ep), values["translation_drift"]))
+            values["rotation_drift"].copy_(torch.where(evaluating, torch.maximum(values["rotation_drift"], er), values["rotation_drift"]))
+            holding = self.grasp_valid & ~self.dropped & bilateral
+            if k >= self.swing_start:
+                x = torch.sqrt(0.5 * ((values["translation_drift"] / self._env.cfg.stability_position_scale).square()
+                    + (values["rotation_drift"] / self._env.cfg.stability_rotation_scale).square()))
+                denominator = 252.0 + x * (48.0 + x * (-43.0 + 23.0 * x))
+                values["stability"].copy_(torch.where(evaluating, (252.0 / denominator) * holding, values["stability"]))
         if self.swing_start < k <= self.unload_end:
-            # 5. 敲击力奖励 force：在挥击开始后至卸载时窗结束之间，逐物理子步维护峰值。
+            # 挥击和卸载期间保留原控制计算；实时有效命中、冲量及终局保持另行评分。
             # head_contact 仅匹配锤头与目标端盖；netforce 给出这些接触的世界系合力。
             contact = self._env.scene.sensors["head_contact"].data
             # native netforce 为 primary(锤头) -> secondary(端盖) 的作用力；压缩投影沿 -n。
             # self.normal 是目标端面外法向；只保留压缩法向分量，切向力和负投影不计分。
             force = (-(contact.force[:, 0] * self.normal).sum(-1)).clamp_min(0)
             touching = contact.found[:, 0] > 0
-            # 仅对挥击前有效抓持、且尚未结束计分的环境累计；完成卸载后不再更新峰值。
-            # impact_started 锁存是否出现过有效正法向接触；valid_strike 只是 0/1 日志，
-            # 不单独加分。peak_force 是奖励使用的峰值（N），并非对子步接触力取平均。
+            # impact_started 保留原条件，继续服务提前卸载控制。
             active = ~self.finished & self.grasp_valid
             self.impact_started |= active & touching & (force > 0)
-            values["peak_force"].copy_(torch.maximum(values["peak_force"], torch.where(active, force, 0)))
-            # touch_peak 另存原场景 touch 传感器的峰值作诊断；奖励仍使用上面的 head_contact。
+            # touch_peak 保留原有诊断门控。
             values["touch_peak"].copy_(torch.maximum(values["touch_peak"], torch.where(active,
                 data.sensordata[:, self.touch_address], 0)))
             # touch 连续为 0 的物理子步数用于判断卸载；重新非零即清零计数。
@@ -384,19 +389,26 @@ class GraspResidualAction(ActionTerm):
             # 未提前满足条件的环境由固定 unload_end 时窗终止，之后执行撤离。
             self.unloaded = torch.where(data.sensordata[:, self.touch_address] == 0, self.unloaded + 1, 0)
             self.finished |= (k > self.swing_end) & self.impact_started & (self.unloaded >= 3) & ~touching
-            values["valid_strike"].copy_(self.impact_started)
-            # force = F_peak / (F_peak + force_scale)；当前 force_scale=60 N。
-            # force_scale 是归一化尺度，不是命中阈值；无有效抓持时峰值保持 0，评分也为 0。
-            values["force"].copy_(values["peak_force"] / (values["peak_force"] + self._env.cfg.force_scale))
+            hit = evaluating & holding & touching & (force > 0)
+            self.first_hit_step.copy_(torch.where(hit & (self.first_hit_step == 0), k, self.first_hit_step))
+            values["valid_strike"].copy_(torch.maximum(values["valid_strike"], hit.float()))
+            values["peak_force"].copy_(torch.maximum(values["peak_force"], torch.where(hit, force, 0)))
+            window_steps = round(self._env.cfg.impact_window_s / self._env.physics_dt)
+            in_window = ((self.first_hit_step > 0) & (k - self.first_hit_step >= 0)
+                         & (k - self.first_hit_step < window_steps))
+            values["impact_impulse"].add_(torch.where(evaluating & holding & in_window, force * self._env.physics_dt, 0))
+            impulse_score = values["impact_impulse"] / (values["impact_impulse"] + self._env.cfg.impulse_scale)
+            values["force"].copy_(torch.where(evaluating, impulse_score * holding, values["force"]))
+            values["task_success"].copy_(torch.where(evaluating, holding & (values["valid_strike"] > 0), values["task_success"]))
         if k > self.swing_end:
-            # 撤离时的 touch 峰值单独记录，只有 returning=True 才累计，不加入五项奖励。
+            # 撤离时的 touch 峰值单独记录，只有 returning=True 才累计，不加入任务奖励。
             values["return_touch_peak"].copy_(torch.maximum(values["return_touch_peak"],
                 torch.where(self.returning, data.sensordata[:, self.touch_address], 0)))
         if self.on_physics_step is not None:
             # 评估/回放时安装的逐子步回调，可用于显示或捕获最终指标。
             self.on_physics_step(self)
         # 返回值供 collect metric 记录；框架会对子步返回值求平均，该日志不等于最终力峰值。
-        # 五项奖励实际由 rewards.score() 读取 values 中各自的缓存，与这里的返回值分开。
+        # 奖励实际由 rewards.score() 读取 values 中各自的缓存，与这里的返回值分开。
         return values["peak_force"]
 
 

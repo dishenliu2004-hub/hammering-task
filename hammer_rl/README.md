@@ -57,7 +57,7 @@ python -m hammer_rl.train \
   --stage teacher \
   --data-file weight/hammer_rl/reset_bank_256.npz \
   --num-envs 128 \
-  --max-iterations 2400 \
+  --max-iterations 2600 \
   --device cuda:0 \
   --seed 42 \
   --log-dir weight/hammer_rl/runs/teacher/formal_02

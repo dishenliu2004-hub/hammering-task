@@ -1,4 +1,4 @@
-"""按四类放置配对比较 SDK 最高分候选的敲击力、成功率和五项原始评分。"""
+"""按四类放置配对比较 SDK 最高分候选的有效峰值力、阶段事件和选定原始评分。"""
 
 import argparse
 import csv
@@ -93,16 +93,17 @@ def main():
              "Trained：相同候选加指定训练模型的确定性六维残差。",
              "每个场景只统计 SDK 最高分候选；两种策略逐场景配对。",
              "抓取成功 lift_success：抬高至少 0.15 m 且锤柄双侧有效接触。",
-             "敲击成功 valid_strike：挥击前有效抓持，且敲击计分窗口内出现锤头与端盖的正法向接触力。",
-             "敲击峰值力 peak_force：挥击至卸载时窗内，锤头作用于目标端盖的压缩法向合力峰值，单位 N；无有效抓持或未命中计 0。",
+             "有效命中 valid_strike：挥击后至撤离前，当时有效持锤的锤头—端盖正法向接触事件；后来掉落仍保留，与完整任务成功 task_success 区分。",
+             "敲击峰值力 peak_force：挥击至卸载结束、撤离之前，当时有效持锤命中的压缩法向合力峰值，单位 N；无有效命中计 0，后来掉落不追溯清零。",
              "平均峰值：先取每次尝试的敲击力峰值，再对全部尝试求平均，包含失败或未命中的 0 N 回合。",
              "趋势图按场景编号排列，各场景独立；不是训练迭代趋势，也不是单次敲击的力-时间曲线。",
              "五项平均分数 wrap/orientation/distance/stability/force 均为未加权原始评分。",
+             "force 为首次有效命中后 40 ms 窗口的归一化法向冲量评分，无量纲；最终仍持锤才保留正分。新指标由评估 NPZ 和控制台提供。",
              "95% CI：按场景配对 bootstrap，10000 次，seed=42。", ""]
     labels = {"peak_force": "平均敲击峰值力(N)", "lift_success": "抓取成功率",
-              "valid_strike": "敲击成功率", "wrap": "平均包络评分",
+              "valid_strike": "有效命中比例", "wrap": "平均包络评分",
               "orientation": "平均朝向评分", "distance": "平均距离评分",
-              "stability": "平均稳定评分", "force": "平均敲击力评分"}
+              "stability": "平均稳定评分", "force": "平均归一化法向冲量评分"}
     for placement, stats in result.items():
         lines.append(f"{placement}: {stats['scenes']} 场景，{stats['episodes']} 次")
         for name, label in labels.items():
@@ -136,8 +137,8 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 4, figsize=(20, 9))
-    titles = ("Impact peak force", "Grasp success", "Strike success", "Wrap score",
-              "Orientation score", "Distance score", "Stability score", "Force score")
+    titles = ("Impact peak force", "Lift success", "Valid held-tool hit", "Wrap score",
+              "Orientation score", "Distance score", "Stability score", "Normal impulse score")
     placement_labels = ("Flat", "Lean\nhead down", "Lean\nhead up", "Inverted")
     x = np.arange(4)
     for ax, name, title in zip(axes.flat, METRICS, titles):
