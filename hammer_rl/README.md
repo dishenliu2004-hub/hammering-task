@@ -25,9 +25,6 @@ Torch 2.9.0+cu128、rsl-rl-lib 5.4.2。
 
 ## 2. 准备训练数据
 
-现有 `weight/hammer_rl/reset_bank.npz` 是流程验证缓存，仅含 8 个场景，
-训练集和评估集各 4 个。以下另建数据文件，供较大规模训练使用。
-
 ```bash
 python -m hammer_rl.prepare \
   --output weight/hammer_rl/reset_bank_256.npz \
@@ -37,41 +34,73 @@ python -m hammer_rl.prepare \
   --workers 4
 ```
 
-- 四类初始摆放按顺序轮流生成；每类内部按场景划分约 80% 训练集、20% 评估集。
-- `--workers` 默认为 `1`（串行）；上例以两个独立进程并行生成场景，结果按场景编号汇总。
-- 每个场景使用由 `--seed` 和场景编号派生的独立随机种子，初始采样不受进程数影响；
-  相同种子的采样结果与旧版共享随机数生成器的方式不同。
-- 每个场景最多保留 32 个候选，实际数量取决于 AnyGrasp 的输出。
-- 此步骤包含落稳仿真、深度图采集、AnyGrasp 推理和抓取开度标定，完成后再开始训练。
-- 依赖 `weight/local_runtime/` 下的 AnyGrasp 运行库和授权，以及
-  `weight/pretrained_weights/anygrasp/checkpoint_detection.tar`。
-- 重复执行会覆盖同名数据文件；训练及后续评估应使用同一份缓存。
-
 ## 3. 教师 PPO 训练
 
 教师 actor 和 critic 使用特权观测。平放（`flat`）、锤头朝下斜靠（`lean_head_down`）、
 锤头朝上斜靠（`lean_head_up`）和倒立（`inverted`）从首次 reset 起同时开放。
-仅教师训练启用组级 SGS：每类保留最近 100 个已完成尝试的原始二值 `task_success`，
-即抓取、保持、有效命中且卸载结束前仍持有；不使用加权奖励或单独的抬升成功率。
-空历史用成功率 `p=0.5`，首次四类概率均为 `0.25`。
+仅教师训练启用动态分配 SGS，仅使用训练样本统计。每类保留最近 512 个已完成尝试，
+每条保存 `task_success`、`peak_force`（N）、`impact_impulse`（N·s）。
+`task_success` 表示抓取、保持、有效命中且卸载结束前仍持有的完整任务成功，
+不使用总奖励或单独的抬升成功率；`force` 奖励仍是归一化冲量评分。
+空历史的成功率为 0.5，初始概率四类均为 0.25。
 
 课程参数保存在 `run_config.json` 的 `placement_sgs`，由现有课程项的 `params` 使用：
-`history_size=100`、`target_success=0.5`、`concentration=1.0`、`temperature=2.0`、
-`epsilon=1e-4`。采样公式为：
+
+| 参数 | 值 |
+| --- | --- |
+| `history_size` | 512 |
+| `warmup_samples_per_class` | 256 |
+| `update_interval` | 10 |
+| `target_success` | 0.9 |
+| `force_scale_n` | 100.0 |
+| `force_mix` | 0.7 |
+| `strength_weight` | 0.5 |
+| `priority_power` | 2.0 |
+| `min_probability` | 0.125 |
+| `max_probability` | 0.45 |
+| `probability_smoothing` | 0.3 |
+| `min_success_samples` | 32 |
+
+对每类历史计算成功率 `s`。只有完整成功样本至少 32 条时，才启用力度项，
+取成功回合峰值力中位数 `F` 和冲量中位数 `J`：
 
 ```text
-w_k = (p_k + epsilon) ** (concentration * target_success)
-      * (1 - p_k + epsilon) ** (concentration * (1 - target_success))
-q = softmax(log(w + epsilon) / temperature)
+d_force = 100 / (F + 100)
+d_impulse = env.cfg.impulse_scale / (J + env.cfg.impulse_scale)
+d_strength = 0.7 * d_force + 0.3 * d_impulse
+d_success = clamp((0.9 - s) / 0.9, 0, 1)
+priority = d_success + 0.5 * (1 - d_success) * d_strength
+score = priority ** 2
 ```
 
-每个训练场景权重为 `q[placement] / 该类训练场景数`，评估场景权重为零，
-场景内候选仍均匀采样。接近 50% 成功率的类别获得更多尝试，四类始终保持非零概率；
-四类成功率相同时均匀采样。`q` 是下次 reset 的目标概率，M 个重置环境的预期份额为
-`M*q`，实际数量可波动。原生日志记录四类各自的 `success_rate_*` 和 `probability_*`。
+成功不足 32 条时 `d_strength=0`，仅表示暂不启用力度项。失败回合即使保留正峰值力，
+也不参与成功力度统计。100 N 是未经当前训练结果调优的峰值力归一化初值，
+不是成功阈值或已标定的目标力；冲量尺度直接复用 `env.cfg.impulse_scale`（当前 1 N·s）。
 
-新课程请从新的 teacher run 启动；本次改动前的教师 checkpoint 不支持直接续训，
-仍可用于原有评估和蒸馏入口。
+四类历史都达到 256 条前保持均分；此后每 10 个含完成尝试的批次更新一次概率。
+随机采样不保证固定批数完成热身。更新公式为：
+
+```text
+score.sum() == 0 时：target = [0.25, 0.25, 0.25, 0.25]
+否则：
+    raw = 0.125 + 0.5 * score / score.sum()
+    excess = clamp_min(raw - 0.45, 0)
+    receivers = (raw <= 0.45)
+    target = raw - excess + excess.sum() * receivers / receivers.sum()
+q_next = 0.7 * q + 0.3 * target
+```
+
+零成功类别优先级为 1；成功率达到 90% 后仍可因力度不足获得额外份额。
+12.5%～45% 是四类目标采样概率边界，不是每批整数名额；128 个环境时，
+每类期望至少约 16 次，实际数量会波动。类内场景仍均匀采样，场景内候选也仍均匀采样。
+每个训练场景权重为 `q[placement] / 该类训练场景数`，评估场景权重为零。
+日志保留 `success_rate_*`、`probability_*`，增加 `strength_deficit_*`、`success_samples_*`。
+调整训练资源分配不等于已经证明四类成功率或敲击力度提升。
+
+新 teacher run 使用当前参数、空历史和均分热身；新策略 checkpoint 普通 `--resume`
+恢复保存的参数、历史、概率和完成批次计数。旧 SGS checkpoint 切换须显式添加
+`--reset-placement-sgs`，保留模型、优化器和迭代，仅采用当前课程配置并重新均分热身，
+不自动迁移旧课程状态。具体续训方法见第 7 节。
 
 ```bash
 python -m hammer_rl.train \
@@ -157,13 +186,13 @@ tensorboard --logdir weight/hammer_rl/runs/teacher/formal_02 --port 6006
 
 ## 7. 中断后继续训练
 
-同一阶段继续训练使用 `--resume`。例如教师已经保存 `model_1499.pt`，
-追加训练 1500 次更新：
+同一阶段继续训练使用 `--resume`。例如新策略教师已保存包含完整课程状态的
+`model_1499.pt`，追加训练 1500 次更新：
 
 ```bash
 python -m hammer_rl.train \
   --stage teacher \
-  --resume weight/hammer_rl/runs/teacher/formal_01/model_1499.pt \
+  --resume weight/hammer_rl/runs/teacher/placement_deficit_本次唯一标识/model_1499.pt \
   --num-envs 128 \
   --max-iterations 1500 \
   --device cuda:0 \
@@ -174,11 +203,36 @@ python -m hammer_rl.train \
 - `--max-iterations` 始终表示**本次追加的更新次数**，不是累计目标次数。
 - 续训会在原权重目录写入结果，并从该目录的 `run_config.json` 恢复阶段、
   数据路径、锤头额外质量、教师 SGS 参数和算法配置。保留权重旁的配置文件。
-- 教师周期和最终 checkpoint 均保存四类成功历史（`infos["placement_sgs"]`）；续训先恢复
-  历史，再在 reset 中重算成功率与场景权重。初始化或恢复后的零长度回合不计入历史。
+- 新策略教师周期和最终 checkpoint 均通过 `infos["placement_sgs"]` 保存 `history`、
+  `probabilities`、`completed_batches`；普通续训恢复全部课程状态。初始化或恢复后的
+  零长度 reset 不追加历史、不增加计数、不平滑概率，但仍把当前概率应用到场景权重。
 - `--num-envs`、`--device`、`--seed` 仍取本次命令参数，建议与原训练保持一致。
 - `--teacher-checkpoint` 用于首次启动蒸馏，`--init-from` 用于首次启动学生 PPO；
   同阶段恢复时使用 `--resume`。
+
+从旧 SGS 教师模型切换时，先选定源 checkpoint，再将它和旁边的 `run_config.json`
+复制到新的实验目录，以保留源实验。以下变量须替换为实际路径和唯一目录名：
+
+```bash
+SOURCE_CHECKPOINT=/实际旧教师训练目录/model_实际编号.pt
+DEST_RUN=weight/hammer_rl/runs/teacher/placement_deficit_本次唯一标识
+mkdir -p "$DEST_RUN"
+cp "$SOURCE_CHECKPOINT" "$DEST_RUN/"
+cp "$(dirname "$SOURCE_CHECKPOINT")/run_config.json" "$DEST_RUN/"
+
+python -m hammer_rl.train \
+  --stage teacher \
+  --resume "$DEST_RUN/$(basename "$SOURCE_CHECKPOINT")" \
+  --reset-placement-sgs \
+  --num-envs 128 \
+  --max-iterations 追加更新次数 \
+  --device cuda:0 \
+  --seed 42
+```
+
+`--resume` 始终在 checkpoint 所在目录继续保存，同时传 `--log-dir` 也不会换目录。
+旧格式课程状态不支持直接普通续训，必须显式重置；之后恢复新生成的 checkpoint，
+使用普通 `--resume`，不要再带 `--reset-placement-sgs`，否则会再次清空课程。
 
 ## 8. 评估训练效果
 

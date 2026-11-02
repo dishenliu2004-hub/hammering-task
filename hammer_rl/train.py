@@ -45,6 +45,11 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--reset-placement-sgs",
+        action="store_true",
+        help="teacher续训时使用当前课程配置并清空课程状态，保留模型和优化器",
+    )
     parser.add_argument("--init-from", type=Path, help="仅 student：蒸馏 checkpoint 初始化 actor")
     parser.add_argument("--teacher-checkpoint", type=Path)
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
@@ -56,6 +61,8 @@ def main():
         args.stage = config["stage"]
         args.data_file = config["data_file"]
         args.hammer_head_extra_mass = config["hammer_head_extra_mass"]
+        if args.stage == "teacher" and args.reset_placement_sgs:
+            config["placement_sgs"] = SGS_PARAMS.copy()
     else:
         stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
         run_dir = args.log_dir or Path("weight/hammer_rl/runs") / args.stage / stamp
@@ -84,7 +91,7 @@ def main():
         if args.resume:
             infos = runner.load(str(args.resume), map_location=args.device)
             runner.current_learning_iteration += 1
-            if args.stage == "teacher":
+            if args.stage == "teacher" and not args.reset_placement_sgs:
                 term = env.unwrapped.curriculum_manager.get_term_cfg("placement").func
                 term.load_state_dict(infos["placement_sgs"])
             if args.stage == "distill" and infos:

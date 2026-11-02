@@ -128,7 +128,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         rewards={name: RewardTermCfg(func=rewards.score, weight=weight, params={"name": name})
                  for name, weight in zip(("capture", "lift_progress", "lift_success", "grasp_before_swing",
                      "wrap", "orientation", "distance", "stability", "force", "task_success", "drop"),
-                     (2, 3, 10, 5, 3, 2, 1, 8, 20, 100, -20))},
+                     (2, 3, 10, 5, 3, 2, 1, 20, 30, 100, -20))},
         terminations={"attempt_complete": TerminationTermCfg(func=terminations.attempt_complete)},
         # 子步收集快照和力峰值，回合末记录最终指标。
         metrics={"collect": MetricsTermCfg(func=collect_attempt, per_substep=True),
