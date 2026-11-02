@@ -84,7 +84,14 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 | `Mean reward` / `Mean episode length` | `Train/mean_reward` / `Train/mean_episode_length` | 全部阶段 |
 | `Steps per second` / `Collection time` / `Learning time` | `Perf/total_fps` / `Perf/collection_time` / `Perf/learning_time` | 全部阶段 |
 | `Episode_Metrics/*` / `Episode_Reward/*` / `Episode_Termination/*` | 与终端名称相同 | 全部阶段 |
-| `Curriculum/placement/phase` | 与终端名称相同 | 仅教师训练 |
+| `Curriculum/placement/success_rate_flat` | 与终端名称相同 | 仅教师训练，平放近期完整成功率 |
+| `Curriculum/placement/success_rate_lean_head_down` | 与终端名称相同 | 仅教师训练，锤头朝下斜靠近期完整成功率 |
+| `Curriculum/placement/success_rate_lean_head_up` | 与终端名称相同 | 仅教师训练，锤头朝上斜靠近期完整成功率 |
+| `Curriculum/placement/success_rate_inverted` | 与终端名称相同 | 仅教师训练，倒立近期完整成功率 |
+| `Curriculum/placement/probability_flat` | 与终端名称相同 | 仅教师训练，下次 reset 的平放目标概率 |
+| `Curriculum/placement/probability_lean_head_down` | 与终端名称相同 | 仅教师训练，下次 reset 的锤头朝下斜靠目标概率 |
+| `Curriculum/placement/probability_lean_head_up` | 与终端名称相同 | 仅教师训练，下次 reset 的锤头朝上斜靠目标概率 |
+| `Curriculum/placement/probability_inverted` | 与终端名称相同 | 仅教师训练，下次 reset 的倒立目标概率 |
 
 上述曲线的默认横轴是 runner 更新编号 `it`，从 0 开始，续训会恢复更新编号；`Train/mean_reward/time` 和 `Train/mean_episode_length/time` 则使用当前 logger 累计的采集与学习墙钟秒数。`Total steps` 仅在终端打印，不是同名 TensorBoard 标量。
 
@@ -151,8 +158,8 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 | orientation | `L × (flat ? 0.4 Q_perp + 0.6 Q_side : Q_perp)` | 2 |
 | distance | `L × clip((p_grip − p_head)·h_A / distance_ref, 0, 1)` | 1 |
 | stability | `I_H × 252 / (252 + 48x − 43x² + 23x³)` | 8 |
-| force | `I_H × J / (J + impulse_scale)` | 10 |
-| task_success | `I_H × I[valid_strike > 0]`，撤离前终值 | 50 |
+| force | `I_H × J / (J + impulse_scale)` | 20 |
+| task_success | `I_H × I[valid_strike > 0]`，撤离前终值 | 100 |
 | drop | `I_dropped`，锁存 | −20 |
 
 **朝向**：`h_A` 是 A 时刻锤体局部 +X 的世界系柄轴，`c_A` 是 narrow 指尖到 wide 指尖的单位向量。`Q_perp = clip(1 − (c_A·h_A)², 0, 1)`。抓取前缓存姿态对应的柄轴为 `h_0`，桌面法向为世界 +Z，`d_side = normalize(n_table × h_0)`；最终抓姿 final_quat 对应的 mount 局部 +Z 接近方向为 a，`Q_side = clip((a·d_side)², 0, 1)`。仅 `placement == 0` 的平放样本使用侧向分，不要求夹指朝某个固定正方向，也不改变接近轨迹。
@@ -203,10 +210,17 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 
 | 指标 | 含义 | 数值范围及解读 |
 | --- | --- | --- |
-| `Curriculum/placement/phase` | 教师训练的摆放课程阶段编号，按 `common_step_counter` 切换。 | 原始值 `{0,1,2}`。0：只采样倒立类；1：倒立类加两种倾斜类；2：再加入平躺类。不是成功率，也不是奖励。当前训练入口默认在 500、1200 次共同环境步处切换；直接调用环境构造函数的默认值是 600、1800，应以实际参数和 `run_config.json` 为准。学生和蒸馏默认不启用此课程。 |
+| `Curriculum/placement/success_rate_*`（上表四类） | 每类最近最多 100 个已完成尝试的原始二值 `task_success` 均值；仅教师训练。 | `[0,1]`；完整成功表示抓取、保持、有效命中且卸载结束前仍持有。空历史的 `0.5` 是启动先验，不是实测成功率；初始化和恢复后的零长度回合不计入。 |
+| `Curriculum/placement/probability_*`（上表四类） | 由各类近期完整成功率计算的下次 reset 目标概率；仅教师训练。 | 各类大于零且总和为 1，首次各为 `0.25`。M 个重置环境的预期类别数量为 `M*q_k`，实际数量可波动，不是已分配的整数环境数。 |
 | `Episode_Termination/attempt_complete` | 本次重置的环境中，满足 `episode_length_buf >= 1` 的数量，表示一次尝试正常结束。 | 单次统计为整数 `[0, num_envs]`；日志还会对本轮各次统计求均值，因此格式可带小数。当前 128 个并行环境每步都结束一个回合，通常为 128；它是**结束数量**，不是成功数量，也不是百分比。 |
 
-课程使用的 `common_step_counter` 每次向量化环境步只增加 1；而 `Total steps` 会按并行环境总数增加。当前单进程且每轮采集一步时，课程计数通常随更新次数增长，不随 `Total steps` 按 128 倍增长。
+教师从第一次 reset 起同时开放四类训练摆放。课程在 reset 事件和动作评分清零前读取旧场景及最终结果，
+按传入环境顺序追加同类结果后截取最近 100 条，不按迭代均值统计。设成功率为 `p_k`，
+`w_k=(p_k+epsilon)^(kappa*t)*(1-p_k+epsilon)^(kappa*(1-t))`，
+`q=softmax(log(w+epsilon)/T)`；默认 `t=0.5`、`kappa=1.0`、`T=2.0`、`epsilon=1e-4`，
+实际参数从 run 配置的 `placement_sgs` 恢复。接近 50% 成功率的类别概率更高，四类成功率
+相同（包括全部失败）时均匀采样。每个训练场景权重为 `q_k/该类训练场景数`，评估场景权重为零。
+四类历史随周期和最终 checkpoint 保存，续训恢复历史后重算概率；课程不再按环境步里程碑切换。
 
 `attempt_complete` 配置为正常 terminal，`time_out=False`，环境还设置 `is_finite_horizon=True`；抬升失败、掉落、未命中同样执行到完整环境步结束，不产生独立的失败终止日志。PPO 不将下一次 reset 后的初始状态作为本次尝试的 bootstrap 价值。
 

@@ -13,7 +13,18 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from rsl_rl.runners import DistillationRunner
 
 from .env_cfg import make_env_cfg
+from .mdp.curriculum import SGS_PARAMS
 from .rl_cfg import ppo_cfg, distill_cfg
+
+
+class _TeacherSgsRunner(MjlabOnPolicyRunner):
+    def save(self, path, infos=None):
+        term = (
+            self.env.unwrapped.curriculum_manager
+            .get_term_cfg("placement").func
+        )
+        infos = {**(infos or {}), "placement_sgs": term.state_dict()}
+        super().save(path, infos=infos)
 
 
 class _RewardLogVecEnvWrapper(RslRlVecEnvWrapper):
@@ -38,7 +49,6 @@ def main():
     parser.add_argument("--teacher-checkpoint", type=Path)
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
     parser.add_argument("--log-dir", type=Path)
-    parser.add_argument("--curriculum-milestones", type=int, nargs=2, default=(500, 1200))
     args = parser.parse_args()
     if args.resume:
         run_dir = args.resume.resolve().parent
@@ -46,30 +56,40 @@ def main():
         args.stage = config["stage"]
         args.data_file = config["data_file"]
         args.hammer_head_extra_mass = config["hammer_head_extra_mass"]
-        args.curriculum_milestones = config["curriculum_milestones"]
     else:
         stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
         run_dir = args.log_dir or Path("weight/hammer_rl/runs") / args.stage / stamp
         config = dict(stage=args.stage, data_file=str(Path(args.data_file).resolve()),
             hammer_head_extra_mass=args.hammer_head_extra_mass,
-            curriculum_milestones=list(args.curriculum_milestones), seed=args.seed)
+            seed=args.seed)
+        if args.stage == "teacher":
+            config["placement_sgs"] = SGS_PARAMS.copy()
         config["rl"] = distill_cfg() if args.stage == "distill" else asdict(ppo_cfg(args.stage))
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     env_cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=args.stage,
-        num_envs=args.num_envs, seed=args.seed, curriculum_milestones=args.curriculum_milestones)
+        num_envs=args.num_envs, seed=args.seed)
+    if args.stage == "teacher":
+        env_cfg.curriculum["placement"].params = config["placement_sgs"]
     env = _RewardLogVecEnvWrapper(ManagerBasedRlEnv(env_cfg, device=args.device))
     train_cfg = config["rl"]
     train_cfg["check_for_nan"] = False
-    runner_type = DistillationRunner if args.stage == "distill" else MjlabOnPolicyRunner
+    runner_type = (
+        _TeacherSgsRunner if args.stage == "teacher"
+        else DistillationRunner if args.stage == "distill"
+        else MjlabOnPolicyRunner
+    )
     try:
         runner = runner_type(env, train_cfg, str(run_dir), device=args.device)
         if args.resume:
             infos = runner.load(str(args.resume), map_location=args.device)
             runner.current_learning_iteration += 1
+            if args.stage == "teacher":
+                term = env.unwrapped.curriculum_manager.get_term_cfg("placement").func
+                term.load_state_dict(infos["placement_sgs"])
             if args.stage == "distill" and infos:
                 env.unwrapped.common_step_counter = infos["env_state"]["common_step_counter"]
-            # wrapper 构造时已经 reset，恢复课程计数后重新采样初始回合。
+            # wrapper 构造时已经 reset，恢复状态后重新采样初始回合。
             env.reset()
         elif args.stage == "distill":
             runner.load(str(args.teacher_checkpoint), map_location=args.device)

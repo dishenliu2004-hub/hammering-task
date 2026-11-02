@@ -87,9 +87,12 @@ critic 用 privileged；A/B 快照与冲击结果均不进入初始观测。
 深度是**夹爪靠近前的冻结抓前帧**，不是 near-object reset 后的实时遮挡帧。
 未添加实时 GPU 相机。改变初始几何、摆放或相机时需重新 prepare。
 
-教师课程只改变摆放样本范围：默认前 600 次 update 选 train flat 最小偏转四分位，
-600～1800 次加入 flat 和逐渐增大倾角的两类 lean，此后四类全覆盖。
-里程碑保存在 run_config.json，resume 恢复 common_step_counter，追加迭代不重定义课程。
+教师课程从首次 reset 起同时开放平放、两类斜靠和倒立，只采样 train 场景。
+组级 SGS 按每类最近 100 个完整尝试的原始 task_success 成功率动态分配采样概率；
+空历史用 0.5，首次四类等概率，中等成功率类别获得更多尝试，所有类别保持非零概率。
+类内场景等概率、场景内候选仍均匀采样；环境总数和物理摆放不变。
+参数记录在 run_config.json 的 placement_sgs，四类历史随周期及最终 checkpoint 保存并在 resume 恢复。
+新课程从新 teacher run 启动，旧教师 checkpoint 仍可用于原有评估和蒸馏入口。
 蒸馏/学生使用全部 train 样本，指面三维摩擦按名义值乘 0.8～1.2，锤子质量和惯量
 同乘 0.9～1.1，每回合从名义值采样；几何和质心不变。
 深度加噪复用 GPU `DepthNoise`，焦距按 1/8 下采样，baseline=0.05 m、范围

@@ -49,8 +49,29 @@ python -m hammer_rl.prepare \
 
 ## 3. 教师 PPO 训练
 
-教师 actor 和 critic 使用特权观测。默认课程里程碑为 500、1200 次环境步；
-当前每次更新采集一个环境步，因此也对应更新进度。
+教师 actor 和 critic 使用特权观测。平放（`flat`）、锤头朝下斜靠（`lean_head_down`）、
+锤头朝上斜靠（`lean_head_up`）和倒立（`inverted`）从首次 reset 起同时开放。
+仅教师训练启用组级 SGS：每类保留最近 100 个已完成尝试的原始二值 `task_success`，
+即抓取、保持、有效命中且卸载结束前仍持有；不使用加权奖励或单独的抬升成功率。
+空历史用成功率 `p=0.5`，首次四类概率均为 `0.25`。
+
+课程参数保存在 `run_config.json` 的 `placement_sgs`，由现有课程项的 `params` 使用：
+`history_size=100`、`target_success=0.5`、`concentration=1.0`、`temperature=2.0`、
+`epsilon=1e-4`。采样公式为：
+
+```text
+w_k = (p_k + epsilon) ** (concentration * target_success)
+      * (1 - p_k + epsilon) ** (concentration * (1 - target_success))
+q = softmax(log(w + epsilon) / temperature)
+```
+
+每个训练场景权重为 `q[placement] / 该类训练场景数`，评估场景权重为零，
+场景内候选仍均匀采样。接近 50% 成功率的类别获得更多尝试，四类始终保持非零概率；
+四类成功率相同时均匀采样。`q` 是下次 reset 的目标概率，M 个重置环境的预期份额为
+`M*q`，实际数量可波动。原生日志记录四类各自的 `success_rate_*` 和 `probability_*`。
+
+新课程请从新的 teacher run 启动；本次改动前的教师 checkpoint 不支持直接续训，
+仍可用于原有评估和蒸馏入口。
 
 ```bash
 python -m hammer_rl.train \
@@ -125,7 +146,7 @@ weight/hammer_rl/runs/student/formal_01/model_2999.pt
 ```bash
 cd /home/ubuntu20/CodeMujoco/hammering-task
 conda activate hammer
-tensorboard --logdir weight/hammer_rl/runs --port 6006
+tensorboard --logdir weight/hammer_rl/runs/teacher/formal_02 --port 6006
 ```
 
 本机浏览器打开 <http://localhost:6006>。
@@ -152,7 +173,9 @@ python -m hammer_rl.train \
 - 将 `--resume` 替换为实际存在的 checkpoint 路径；蒸馏和学生阶段也可用相同方式续训。
 - `--max-iterations` 始终表示**本次追加的更新次数**，不是累计目标次数。
 - 续训会在原权重目录写入结果，并从该目录的 `run_config.json` 恢复阶段、
-  数据路径、锤头额外质量、课程里程碑和算法配置。保留权重旁的配置文件。
+  数据路径、锤头额外质量、教师 SGS 参数和算法配置。保留权重旁的配置文件。
+- 教师周期和最终 checkpoint 均保存四类成功历史（`infos["placement_sgs"]`）；续训先恢复
+  历史，再在 reset 中重算成功率与场景权重。初始化或恢复后的零长度回合不计入历史。
 - `--num-envs`、`--device`、`--seed` 仍取本次命令参数，建议与原训练保持一致。
 - `--teacher-checkpoint` 用于首次启动蒸馏，`--init-from` 用于首次启动学生 PPO；
   同阶段恢复时使用 `--resume`。
@@ -344,7 +367,6 @@ JSON 顶层按 `flat`、`lean_head_down`、`lean_head_up`、`inverted` 分组，
 | `--device cuda:0` | 使用第 0 张 GPU |
 | `--seed 42` | 随机种子 |
 | `--log-dir 路径` | 新训练的日志及权重目录 |
-| `--curriculum-milestones 600 1800` | 教师课程的两个切换里程碑 |
 | `--hammer-head-extra-mass 0.0` | 锤头额外质量，单位 kg；准备数据和训练必须一致 |
 
 - 训练入口没有 `--headless` 参数，按上面的命令启动即可。

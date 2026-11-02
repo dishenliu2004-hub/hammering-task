@@ -36,8 +36,6 @@ class HammerEnvCfg(ManagerBasedRlEnvCfg):
     mass_range: tuple = (0.9, 1.1)
     friction_range: tuple = (0.8, 1.2)
 
-    curriculum_milestones: tuple = (600, 1800)  # 课程切换步数
-
     lift_threshold: float = 0.15  # 有效抬升高度，m
     distance_ref: float = 0.315  # 距离归一化尺度，m
     stability_position_scale: float = 0.005  # 相对平移尺度，m
@@ -63,7 +61,7 @@ def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
 
 def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/reset_bank.npz",
                  stage="teacher", num_envs=128, split="train", seed=42,
-                 training=True, curriculum_milestones=(600, 1800)) -> HammerEnvCfg:
+                 training=True) -> HammerEnvCfg:
     # 使用总场景编译后的物理步长。
     model = mujoco.MjModel.from_xml_path(str(SCENE))
     opt = model.opt
@@ -104,7 +102,6 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
 
     cfg = HammerEnvCfg(data_file=str(data_file), stage=stage, split=split, seed=seed,
         randomize_physics=randomize, visual_noise=randomize,
-        curriculum_milestones=tuple(curriculum_milestones),
         scene=SceneCfg(num_envs=num_envs, sensors=sensors,
             spec_fn=partial(_attach_scene, hammer_head_extra_mass=hammer_head_extra_mass)),
         sim=SimulationCfg(nconmax=128, njmax=1024, contact_sensor_maxmatch=128, mujoco=MujocoCfg(
@@ -131,7 +128,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         rewards={name: RewardTermCfg(func=rewards.score, weight=weight, params={"name": name})
                  for name, weight in zip(("capture", "lift_progress", "lift_success", "grasp_before_swing",
                      "wrap", "orientation", "distance", "stability", "force", "task_success", "drop"),
-                     (2, 3, 10, 5, 3, 2, 1, 8, 10, 50, -20))},
+                     (2, 3, 10, 5, 3, 2, 1, 8, 20, 100, -20))},
         terminations={"attempt_complete": TerminationTermCfg(func=terminations.attempt_complete)},
         # 子步收集快照和力峰值，回合末记录最终指标。
         metrics={"collect": MetricsTermCfg(func=collect_attempt, per_substep=True),
@@ -142,7 +139,8 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                         "return_touch_peak", "lift_height", "grasp_before_swing", "grip_distance",
                         "seat_closure", "seat_lift", "seat_before_swing")}},
         # 仅教师训练启用摆放课程。
-        curriculum={"placement": CurriculumTermCfg(func=curriculum.placement_curriculum)}
+        curriculum={"placement": CurriculumTermCfg(func=curriculum.PlacementCurriculum,
+                                                   params=curriculum.SGS_PARAMS.copy())}
                    if stage == "teacher" and training else {},
     )
     return cfg
