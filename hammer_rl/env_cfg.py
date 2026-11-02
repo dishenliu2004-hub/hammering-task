@@ -38,7 +38,7 @@ class HammerEnvCfg(ManagerBasedRlEnvCfg):
 
     lift_threshold: float = 0.15  # 有效抬升高度，m
     distance_ref: float = 0.315  # 距离归一化尺度，m
-    stability_position_scale: float = 0.005  # 相对平移尺度，m
+    stability_position_scale: float = 0.015  # 相对平移尺度，m
     stability_rotation_scale: float = math.pi / 36  # 相对旋转尺度，5°
     impact_window_s: float = 0.04  # 首次有效命中后的冲量积分窗口，s
     impulse_scale: float = 1.0  # 法向冲量归一化尺度，N·s
@@ -135,8 +135,8 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                  **{name: MetricsTermCfg(func=rewards.score, params={"name": name}, reduce="last")
                     for name in ("capture", "lift_progress", "lift_success", "wrap", "orientation", "distance", "stability", "force",
                         "impact_impulse", "task_success", "drop",
-                        "translation_drift", "rotation_drift", "peak_force", "valid_strike", "touch_peak",
-                        "return_touch_peak", "lift_height", "grasp_before_swing", "grip_distance",
+                        "translation_drift", "rotation_drift", "peak_force", "valid_strike",
+                        "lift_height", "grasp_before_swing",
                         "seat_closure", "seat_lift", "seat_before_swing")}},
         # 仅教师训练启用摆放课程。
         curriculum={"placement": CurriculumTermCfg(func=curriculum.PlacementCurriculum,

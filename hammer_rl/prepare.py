@@ -147,7 +147,7 @@ def prepare_scene(rng, placement, candidates_per_scene, hammer_head_extra_mass=0
     object_rot = Rotation.from_quat(sample["hammer_quat"][[1, 2, 3, 0]])
     candidates = []
     for i in range(count):
-        pose = candidate_to_mount(grasps, i)
+        pose = candidate_to_mount(grasps, i, extra_depth=0.03)
         rotation = Rotation.from_quat(pose["mount_quat"][[1, 2, 3, 0]])
         candidates.append(dict(
             local_pos=object_rot.inv().apply(pose["mount_pos"] - sample["hammer_pos"]),

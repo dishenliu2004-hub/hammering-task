@@ -106,17 +106,11 @@ q_next = 0.7 * q + 0.3 * target
 python -m hammer_rl.train \
   --stage teacher \
   --data-file weight/hammer_rl/reset_bank_256.npz \
-  --num-envs 128 \
-  --max-iterations 2600 \
+  --num-envs 256 \
+  --max-iterations 3000 \
   --device cuda:0 \
   --seed 42 \
-  --log-dir weight/hammer_rl/runs/teacher/formal_02
-```
-
-从头成功完成 3000 次更新后，最终权重为：
-
-```text
-weight/hammer_rl/runs/teacher/formal_01/model_2999.pt
+  --log-dir weight/hammer_rl/runs/teacher/formal_01
 ```
 
 ## 4. 教师向学生蒸馏
@@ -168,6 +162,13 @@ weight/hammer_rl/runs/student/formal_01/model_2999.pt
 若调整迭代数或使用续训，请以程序结束时打印的 `checkpoint:` 路径为准，
 并同步修改下一阶段的输入权重路径。
 
+三个阶段还会在运行目录保留 `model_best.pt`：教师和学生 PPO 按本轮
+`Train/total_reward` 最高选优（多个采集步取均值），蒸馏按本轮 `Loss/behavior`
+最低选优。每轮比较，仅严格改善时覆盖；周期和最终权重仍按原方式保存。
+最佳权重包含完整训练状态，可用于评估、下一阶段初始化或 `--resume`。
+`infos["best_score"]` 在 PPO 阶段保存奖励，在蒸馏阶段保存损失的负值；同一运行目录已有
+`model_best.pt` 时沿用其最佳记录，否则从本次训练开始记录，不回溯旧权重。
+
 ## 6. 查看训练曲线
 
 在另一个终端执行：
@@ -179,6 +180,10 @@ tensorboard --logdir weight/hammer_rl/runs/teacher/formal_02 --port 6006
 ```
 
 本机浏览器打开 <http://localhost:6006>。
+
+在 Scalars 界面选择 `Train/total_reward`，横轴使用 `Step`，将 Smoothing 设为 `0`，
+即可查看每轮总奖励的变化（各并行环境的总奖励均值）。训练期间曲线随日志刷新。
+该曲线从使用修改后脚本启动或继续训练时开始记录。
 
 训练目录包含 TensorBoard 日志、`model_*.pt` 权重和 `run_config.json` 配置。
 默认每 50 次更新保存权重，正常结束时也会保存最终权重。
@@ -192,9 +197,9 @@ tensorboard --logdir weight/hammer_rl/runs/teacher/formal_02 --port 6006
 ```bash
 python -m hammer_rl.train \
   --stage teacher \
-  --resume weight/hammer_rl/runs/teacher/placement_deficit_本次唯一标识/model_1499.pt \
-  --num-envs 128 \
-  --max-iterations 1500 \
+  --resume weight/hammer_rl/runs/teacher/formal_01/model_600.pt \
+  --num-envs 256 \
+  --max-iterations 2000 \
   --device cuda:0 \
   --seed 42
 ```
@@ -234,68 +239,9 @@ python -m hammer_rl.train \
 旧格式课程状态不支持直接普通续训，必须显式重置；之后恢复新生成的 checkpoint，
 使用普通 `--resume`，不要再带 `--reset-placement-sgs`，否则会再次清空课程。
 
-## 8. 评估训练效果
+## 8. 可视化回放
 
-先运行零残差基线，再用相同数据、划分和随机种子评估学习策略。
-以下命令通过 `--placement all --episodes 0` 覆盖四类放置的全部评估候选，
-后续对比只统计每场景的 SDK 最高分候选。
-
-```bash
-# 零残差基线
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
-  --split eval \
-  --placement all \
-  --policy zero \
-  --hammer-head-extra-mass 0.0 \
-  --episodes 0 \
-  --num-envs 16 \
-  --device cuda:0 \
-  --seed 42 \
-  --headless \
-  --output weight/hammer_rl/eval_zero_formal_01.npz
-
-# 教师模型
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
-  --split eval \
-  --placement all \
-  --policy trained \
-  --checkpoint weight/hammer_rl/runs/teacher/formal_01/model_2350.pt \
-  --episodes 0 \
-  --num-envs 16 \
-  --device cuda:0 \
-  --seed 42 \
-  --headless \
-  --output weight/hammer_rl/eval_teacher_formal_01.npz
-
-# 最终学生模型
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
-  --split eval \
-  --placement all \
-  --policy trained \
-  --checkpoint weight/hammer_rl/runs/student/formal_01/model_2999.pt \
-  --episodes 0 \
-  --num-envs 16 \
-  --device cuda:0 \
-  --seed 42 \
-  --headless \
-  --output weight/hammer_rl/eval_student_formal_01.npz
-```
-
-终端会打印奖励及过程指标的均值、分位数和最大值；`--output` 保存逐样本原始指标。
-评估默认关闭物理随机化和深度噪声；若要评估深度噪声，对各策略统一添加 `--noise`。
-评估时务必显式指定训练使用的数据文件：当前评估入口不会自动从 run 配置恢复数据路径。
-
-`--episodes 0` 会将选定划分中的每个候选恰好评估一次。原始 SDK 基线使用缓存候选和既有
-位姿转换、开度标定，执行零残差；训练模型在同一候选上增加六维修正。
-基线的 `--hammer-head-extra-mass` 必须与指定 checkpoint 目录中 `run_config.json`
-的同名设置一致，上例为 `0.0`。四类统计报告的完整操作见第 10 节。
-
-## 9. 可视化回放
-
-### 9.1 单场景回放
+### 8.1 单场景回放
 
 在具有图形显示环境的终端执行：
 
@@ -310,7 +256,7 @@ python -m hammer_rl.evaluate \
   --viewer native
 ```
 
-### 9.2 六场景同步对比
+### 8.2 六场景同步对比
 
 ```bash
 cd /home/ubuntu20/CodeMujoco/hammering-task
@@ -343,76 +289,24 @@ python -m visualization.compare_hammering \
 默认 `--split eval --seed 42 --device cuda:0`，关闭物理随机化和深度噪声，固定六个环境。
 当前 `reset_bank_256.npz` 的每类评估集有 13 个场景，可用于三组配对展示。
 
-## 10. 四类放置的敲击效果统计对比
+## 9. 四类放置的奖励与 SDK 对比 CSV
 
-两份评估输出使用相同数据和候选顺序，统计脚本只取每场景的 SDK 最高分候选，
-分别汇总四类放置；失败或未命中的零值参与平均。
+在项目根目录、已激活 `hammer` 环境后，只需指定要对比的权重：
 
 ```bash
-cd /home/ubuntu20/CodeMujoco/hammering-task
-conda activate hammer
-export MUJOCO_GL=glfw
-export MPLBACKEND=Agg
-
-CHECKPOINT=weight/hammer_rl/runs/teacher/formal_01/model_2350.pt
-EXTRA_MASS=0.0  # 与上述 checkpoint 旁 run_config.json 的 hammer_head_extra_mass 一致
-OUT=weight/hammer_rl/comparison_all_model_2350
-mkdir -p "$OUT"
-
-# 1. 原始 AnyGrasp 候选：零残差基线
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
-  --split eval \
-  --placement all \
-  --policy zero \
-  --hammer-head-extra-mass "$EXTRA_MASS" \
-  --episodes 0 \
-  --num-envs 104 \
-  --device cuda:0 \
-  --seed 42 \
-  --headless \
-  --output "$OUT/zero.npz"
-
-# 2. 指定训练模型：对相同候选进行位姿修正
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
-  --split eval \
-  --placement all \
-  --policy trained \
-  --checkpoint "$CHECKPOINT" \
-  --episodes 0 \
-  --num-envs 104 \
-  --device cuda:0 \
-  --seed 42 \
-  --headless \
-  --output "$OUT/trained.npz"
-
-# 3. 按四类放置生成 SDK 最高分候选的指标报告和对比图
 python -m hammer_rl.compare_evaluations \
-  --zero "$OUT/zero.npz" \
-  --trained "$OUT/trained.npz" \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
-  --output-dir "$OUT"
+  --checkpoint weight/hammer_rl/runs/teacher/formal_01/model_best.pt
 ```
 
-输出目录包含 `summary.json`、`report.txt`、`per_scene.csv`、`force_per_scene.csv`、
-八项指标对比图 `comparison.png`，以及按四类放置分别绘制的逐场景力值图 `force_trend.png`。
-JSON 顶层按 `flat`、`lean_head_down`、`lean_head_up`、`inverted` 分组，
-各组记录样本数、两种策略的均值、差值及按场景配对 bootstrap 的 95% 置信区间。
+默认使用训练缓存同目录的 `eval_bank_128.npz`：四类各 32 个独立评估场景，
+每场景只保留 SDK 最高分候选，两种策略各评估 128 次；默认并行环境数为 128。
+该缓存包含原有 52 个评估场景及新增的 76 个场景，不包含训练场景。
+可用 `--data-file` 指定其他同格式的独立评估缓存。
 
-| 指标 | 统计口径 |
-| --- | --- |
-| 敲击力 `peak_force` | 每次尝试有效敲击峰值力的平均值，单位 N，包含失败的 0 N |
-| 抓取成功率 `lift_success` | 抬升至少 0.15 m 且锤柄双侧有效接触的场景比例 |
-| 敲击成功率 `valid_strike` | 挥击前有效抓持，且计分窗口内出现锤头对目标端盖正法向接触力的场景比例 |
-| 五项奖励平均分 | `wrap`、`orientation`、`distance`、`stability`、`force` 的未加权原始评分均值 |
+SDK 默认额外深入 10 mm；强化学习离线场景生成仍使用 30 mm。此对比脚本仅为 SDK
+基线创建沿接近方向回退 20 mm 的临时缓存；训练策略继续使用原 30 mm 候选，原缓存不变。
 
-六场景窗口的总奖励使用当前环境的奖励权重，当前公式为
-`wrap + orientation + 0.5 * distance + 2 * stability + 5 * force`，
-没有训练日志 `Episode_Reward/*` 的时长归一化。图中两种策略统一标为 `AnyGrasp` 和 `Trained`。
-逐场景力值图横轴为独立场景编号，不是训练迭代或仿真时间。
-
-## 11. 常用参数与操作提示
+## 10. 常用参数与操作提示
 
 | 参数 | 含义 |
 | --- | --- |

@@ -1,8 +1,10 @@
 """薄训练入口：原生 manager env、现成 PPO/DistillationRunner 与 checkpoint 衔接。"""
 
 import argparse
+from contextlib import redirect_stdout
 from dataclasses import asdict
 from datetime import datetime
+from io import StringIO
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -33,7 +35,46 @@ class _RewardLogVecEnvWrapper(RslRlVecEnvWrapper):
         # 直接记录加权评分，不按回合时长归一化。
         for name, term in self.cfg.rewards.items():
             extras["log"][f"Episode_Reward/{name}"] = extras["log"][f"Episode_Metrics/{name}"] * term.weight
+        extras["log"]["Train/total_reward"] = reward.mean()
         return obs, reward, done, extras
+
+
+def _enable_best_checkpoint(runner, stage, run_dir):
+    best_path = run_dir / "model_best.pt"
+    best_score = (
+        torch.load(best_path, map_location="cpu", weights_only=False)["infos"]["best_score"]
+        if best_path.exists() else float("-inf")
+    )
+    log = runner.logger.log
+
+    def log_with_best(**kwargs):
+        nonlocal best_score
+        # 原日志方法会清空 ep_extras，先读取本轮指标。
+        score = (
+            -kwargs["loss_dict"]["behavior"] if stage == "distill"
+            else torch.stack([
+                info["Train/total_reward"] for info in runner.logger.ep_extras
+            ]).mean().item()
+        )
+        with redirect_stdout(StringIO()) as output:
+            log(**kwargs)
+        for line in output.getvalue().splitlines():
+            label = line.split(":", 1)[0].strip()
+            if (
+                "Learning iteration " in line
+                or label.startswith("Episode_Reward/")
+                or label in ("Train/total_reward", "Total steps", "Iteration time")
+                or (label.startswith("Mean ") and label.endswith(" loss"))
+            ):
+                print(line)
+        if score > best_score:
+            best_score = score
+            runner.save(str(best_path), infos={
+                "best_score": best_score,
+                "env_state": {"common_step_counter": runner.env.unwrapped.common_step_counter},
+            })
+
+    runner.logger.log = log_with_best
 
 
 def main():
@@ -103,6 +144,7 @@ def main():
         elif args.stage == "student":
             checkpoint = torch.load(args.init_from, map_location=args.device, weights_only=False)
             runner.alg.load({"actor_state_dict": checkpoint["student_state_dict"]}, {"actor": True}, strict=True)
+        _enable_best_checkpoint(runner, args.stage, run_dir)
         runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)
         checkpoint = run_dir / f"model_{runner.current_learning_iteration}.pt"
         runner.save(str(checkpoint), infos={"env_state": {"common_step_counter": env.unwrapped.common_step_counter}})

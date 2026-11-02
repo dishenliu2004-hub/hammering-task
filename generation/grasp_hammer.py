@@ -169,7 +169,7 @@ def generate_grasps(model, data, frame, *, full_scene=False, workspace_bounds=No
     return grasps, candidate_to_mount(grasps, 0) if convert_first else None
 
 
-def candidate_to_mount(grasps, i):
+def candidate_to_mount(grasps, i, *, extra_depth=0.01):
     """复用同一开度标定与 mount/TCP 转换；候选输入为世界坐标。"""
     _, gripper_open_ctrl, tcp_offset = grasp_width_to_joint_angle(grasps["widths"][i])
 
@@ -178,7 +178,7 @@ def candidate_to_mount(grasps, i):
     mount_quat = mount_rot.as_quat()[[3, 0, 1, 2]]
     mount_pos = (grasps["translations"][i] + grasps["depths"][i] * grasp_rot[:, 0]
                  - mount_rot.apply(tcp_offset))
-    mount_pos += 0.03 * grasp_rot[:, 0] #新增，沿接近方向额外深入30mm
+    mount_pos += extra_depth * grasp_rot[:, 0]  # 沿接近方向额外深入，默认 10 mm。
     pregrasp_pos = mount_pos - 0.10 * grasp_rot[:, 0]
 
     return {
