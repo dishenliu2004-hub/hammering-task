@@ -6,10 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hammer_rl.env_cfg import make_env_cfg
@@ -21,37 +19,30 @@ METRICS = ("valid_strike", "peak_force")
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--data-file", type=Path, help="独立评估缓存，每类 32 个场景，每场景一个 SDK 最高分候选")
+    parser.add_argument("--data-file", type=Path, help="已有测试场景及 SDK 抓取位姿缓存")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--num-envs", type=int, default=128)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     checkpoint = args.checkpoint.resolve()
     config = json.loads((checkpoint.parent / "run_config.json").read_text())
-    data_file = args.data_file or Path(config["data_file"]).with_name("eval_bank_128.npz")
+    data_file = args.data_file or Path(__file__).resolve().parents[1] / "weight/hammer_rl/eval_bank_128.npz"
     output_dir = args.output_dir or checkpoint.parent / f"comparison_{checkpoint.stem}"
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluation = [
         sys.executable, "-m", "hammer_rl.evaluate",
         "--split", "eval", "--placement", "all",
         "--episodes", "0", "--num-envs", str(args.num_envs),
-        "--device", args.device, "--seed", str(config["seed"]), "--headless",
+        "--device", args.device, "--headless",
     ]
-    with TemporaryDirectory(prefix="hammer_sdk_eval_") as directory:
-        with np.load(data_file) as source:
-            sdk_bank = dict(source)
-        # 离线候选已额外深入 30 mm；SDK 基线沿局部接近轴回退 20 mm。
-        sdk_bank["local_pos"] -= Rotation.from_quat(sdk_bank["local_quat"][:, [1, 2, 3, 0]]).apply([0, 0, 0.02])
-        sdk_data_file = Path(directory) / "sdk_bank.npz"
-        np.savez_compressed(sdk_data_file, **sdk_bank)
-        for policy in ("zero", "trained"):
-            command = [*evaluation, "--data-file", str(sdk_data_file if policy == "zero" else data_file),
-                "--policy", policy, "--output", str(output_dir / f"{policy}.npz")]
-            if policy == "zero":
-                command.extend(("--hammer-head-extra-mass", str(config["hammer_head_extra_mass"])))
-            else:
-                command.extend(("--checkpoint", str(checkpoint)))
-            subprocess.run(command, check=True)
+    for policy in ("zero", "trained"):
+        command = [*evaluation, "--data-file", str(data_file),
+            "--policy", policy, "--output", str(output_dir / f"{policy}.npz")]
+        if policy == "zero":
+            command.extend(("--hammer-head-extra-mass", str(config["hammer_head_extra_mass"])))
+        else:
+            command.extend(("--checkpoint", str(checkpoint)))
+        subprocess.run(command, check=True)
     with np.load(output_dir / "zero.npz") as source:
         zero = dict(source)
     with np.load(output_dir / "trained.npz") as source:
@@ -64,13 +55,8 @@ def main():
     if len(np.unique(pairs, axis=0)) != len(pairs):
         raise ValueError("Duplicate scene/candidate pairs")
     with np.load(data_file) as bank:
-        top1 = np.array([c == int(bank["offsets"][s]) for s, c in pairs])
         placements = bank["placement"][zero["scene_id"]]
-        for s in np.unique(pairs[:, 0]):
-            scores = bank["scores"][bank["offsets"][s]:bank["offsets"][s + 1]]
-            if not np.all(scores[:-1] >= scores[1:]):
-                raise ValueError("SDK candidates must be sorted by score")
-    selections = {name: top1 & (placements == i) for i, name in enumerate(PLACEMENTS)}
+    selections = {name: placements == i for i, name in enumerate(PLACEMENTS)}
     reward_terms = make_env_cfg(data_file=str(data_file), training=False).rewards
     rewards_path = output_dir / "trained_rewards.csv"
     comparison_path = output_dir / "metrics_comparison.csv"

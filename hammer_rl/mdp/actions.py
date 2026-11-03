@@ -51,8 +51,8 @@ def sampled_progress(substep, duration, substeps, quintic=False):
 """控制6维残差抓取位姿的运动空间的调整范围"""
 @dataclass(kw_only=True)
 class GraspResidualActionCfg(ActionTermCfg):
-    position_scale: float = 0.05
-    rotation_scale: float = math.pi / 30
+    position_scale: float = 0.10
+    rotation_scale: float = math.pi / 5
     unload_time: float = 1.0
 
     def build(self, env):

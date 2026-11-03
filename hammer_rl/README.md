@@ -56,8 +56,8 @@ python -m hammer_rl.prepare \
 | `force_mix` | 0.7 |
 | `strength_weight` | 0.5 |
 | `priority_power` | 2.0 |
-| `min_probability` | 0.125 |
-| `max_probability` | 0.45 |
+| `min_probability` | 0.075 |
+| `max_probability` | 0.775 |
 | `probability_smoothing` | 0.3 |
 | `min_success_samples` | 32 |
 
@@ -83,16 +83,18 @@ score = priority ** 2
 ```text
 score.sum() == 0 时：target = [0.25, 0.25, 0.25, 0.25]
 否则：
-    raw = 0.125 + 0.5 * score / score.sum()
-    excess = clamp_min(raw - 0.45, 0)
-    receivers = (raw <= 0.45)
+    raw = 0.075 + 0.70 * score / score.sum()
+    excess = clamp_min(raw - 0.775, 0)
+    receivers = (raw <= 0.775)
     target = raw - excess + excess.sum() * receivers / receivers.sum()
 q_next = 0.7 * q + 0.3 * target
 ```
 
 零成功类别优先级为 1；成功率达到 90% 后仍可因力度不足获得额外份额。
-12.5%～45% 是四类目标采样概率边界，不是每批整数名额；128 个环境时，
-每类期望至少约 16 次，实际数量会波动。类内场景仍均匀采样，场景内候选也仍均匀采样。
+固定保底份额合计 30%（每类 7.5%），剩余 70% 按 score 动态分配。
+7.5%～77.5% 是四类目标采样概率边界，实际概率经平滑逐步接近目标，不是每批整数名额；
+256 个环境时，每类保底对应的期望数量为 19.2 次，实际数量会波动。
+类内场景仍均匀采样，场景内候选也仍均匀采样。
 每个训练场景权重为 `q[placement] / 该类训练场景数`，评估场景权重为零。
 日志保留 `success_rate_*`、`probability_*`，增加 `strength_deficit_*`、`success_samples_*`。
 调整训练资源分配不等于已经证明四类成功率或敲击力度提升。
@@ -110,7 +112,7 @@ python -m hammer_rl.train \
   --max-iterations 3000 \
   --device cuda:0 \
   --seed 42 \
-  --log-dir weight/hammer_rl/runs/teacher/formal_01
+  --log-dir weight/hammer_rl/runs/teacher/formal_02
 ```
 
 ## 4. 教师向学生蒸馏
@@ -241,32 +243,16 @@ python -m hammer_rl.train \
 
 ## 8. 可视化回放
 
-### 8.1 单场景回放
-
-在具有图形显示环境的终端执行：
-
-```bash
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
-  --split eval \
-  --policy trained \
-  --checkpoint weight/hammer_rl/runs/student/formal_01/model_2999.pt \
-  --episodes 1 \
-  --device cuda:0 \
-  --viewer native
-```
-
-### 8.2 六场景同步对比
+### 8.1 六场景同步对比
 
 ```bash
 cd /home/ubuntu20/CodeMujoco/hammering-task
 
 python -m visualization.compare_hammering \
-  --checkpoint weight/hammer_rl/runs/teacher/formal_01/model_2350.pt \
-  --placement inverted \
+  --checkpoint weight/hammer_rl/runs/teacher/formal_01/model_best.pt \
+  --placement flat \
   --split eval \
-  --device cuda:0 \
-  --seed 42
+  --device cuda:0
 ```
 
 `--checkpoint` 和 `--placement` 必填；四种放置参数如下：
@@ -284,11 +270,6 @@ python -m visualization.compare_hammering \
 窗口同时显示六个环境的场景编号、敲击峰值力（N）和加权总奖励；执行中数值随阶段更新，
 完成后暂停并保留最终画面与数值，按 **回车** 重播同三组对照。
 
-默认从 checkpoint 旁的 `run_config.json` 读取数据路径和锤头额外质量；
-可通过 `--data-file` 指定缓存、`--split train` 切换训练场景、`--spacing 1.4` 调整网格间距。
-默认 `--split eval --seed 42 --device cuda:0`，关闭物理随机化和深度噪声，固定六个环境。
-当前 `reset_bank_256.npz` 的每类评估集有 13 个场景，可用于三组配对展示。
-
 ## 9. 四类放置的奖励与 SDK 对比 CSV
 
 在项目根目录、已激活 `hammer` 环境后，只需指定要对比的权重：
@@ -297,14 +278,6 @@ python -m visualization.compare_hammering \
 python -m hammer_rl.compare_evaluations \
   --checkpoint weight/hammer_rl/runs/teacher/formal_01/model_best.pt
 ```
-
-默认使用训练缓存同目录的 `eval_bank_128.npz`：四类各 32 个独立评估场景，
-每场景只保留 SDK 最高分候选，两种策略各评估 128 次；默认并行环境数为 128。
-该缓存包含原有 52 个评估场景及新增的 76 个场景，不包含训练场景。
-可用 `--data-file` 指定其他同格式的独立评估缓存。
-
-SDK 默认额外深入 10 mm；强化学习离线场景生成仍使用 30 mm。此对比脚本仅为 SDK
-基线创建沿接近方向回退 20 mm 的临时缓存；训练策略继续使用原 30 mm 候选，原缓存不变。
 
 ## 10. 常用参数与操作提示
 

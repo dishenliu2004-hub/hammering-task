@@ -19,8 +19,8 @@ SGS_PARAMS = {
     "force_mix": 0.7,
     "strength_weight": 0.5,
     "priority_power": 2.0,
-    "min_probability": 0.125,
-    "max_probability": 0.45,
+    "min_probability": 0.075,
+    "max_probability": 0.775,
     "probability_smoothing": 0.3,
     "min_success_samples": 32,
 }

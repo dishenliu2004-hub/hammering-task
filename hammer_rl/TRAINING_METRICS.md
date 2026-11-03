@@ -150,19 +150,19 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 
 `I[条件]` 表示条件成立取 1，否则取 0；`clip` 为截断。闭合、A、B 时点以及 L、G、H 定义见第 3 节。事件每次尝试只计一次，子步仅更新缓存，reward manager 在环境步末加权求和。
 
-| 键名 | 原始评分 | 权重 |
-| --- | --- | ---: |
-| capture | `(I_left + I_right) / 2`，闭合结束写入 | 2 |
-| lift_progress | `I_bilateral(A) × clip(Δz / lift_threshold, 0, 1)` | 3 |
-| lift_success | `L = I[Δz ≥ lift_threshold] × I_bilateral(A)` | 10 |
-| grasp_before_swing | `G = L × I[未掉落(B)] × I_bilateral(B)` | 5 |
-| wrap | `[L(2E + 0.10 seat_closure + 0.15 seat_lift) + 0.25 G seat_before_swing] / 1.5` | 3 |
-| orientation | `L × (flat ? 0.4 Q_perp + 0.6 Q_side : Q_perp)` | 2 |
-| distance | `L × clip((p_grip − p_head)·h_A / distance_ref, 0, 1)` | 1 |
-| stability | `I_H × S(x)`，分段线性插值与指数衰减，见下文 | 20 |
-| force | `peak_force / 10`，有效命中峰值保留 | 30 |
-| task_success | `I_H × I[valid_strike > 0]`，撤离前终值 | 100 |
-| drop | `I_dropped`，锁存 | −20 |
+| 键名 | 原始评分 | 权重 | 奖励（惩罚）的情况与引导效果 |
+| --- | --- | ---: | --- |
+| capture | `(I_left + I_right) / 2`，闭合结束写入 | 2 | 闭合结束时，单侧形成有效锤柄接触得一半分，双侧接触得满分；引导抓取位姿先建立接触，再形成双侧夹持。 |
+| lift_progress | `I_bilateral(A) × clip(Δz / lift_threshold, 0, 1)` | 3 | A 时刻保持双侧接触且锤体被抬高时，按高度给予连续奖励，达到 15 cm 得满分；为尚未完成抬升的尝试提供渐进反馈，引导抓姿从接触向有效抬升改进。 |
+| lift_success | `L = I[Δz ≥ lift_threshold] × I_bilateral(A)` | 10 | A 时刻真实抬升高度至少 15 cm 且仍有双侧接触时奖励；引导形成能将锤子可靠抬起的有效抓取。 |
+| grasp_before_swing | `G = L × I[未掉落(B)] × I_bilateral(B)` | 5 | 已成功抬升、到 B 时刻未锁存掉落且仍有双侧接触时奖励；引导选择能经受搬运和挥击前姿态调整的抓姿。 |
+| wrap | `[L(2E + 0.10 seat_closure + 0.15 seat_lift) + 0.25 G seat_before_swing] / 1.5` | 3 | 成功抬升后，对闭合时真包络下的指节内弯包覆给予正分，外弯包络给予负分，并奖励闭合、抬升时的有效顶靠；B 时刻满足 G 再奖励有效顶靠。引导形成内弯包覆、锤柄顶靠支撑面的抓姿，提高抓持约束。 |
+| orientation | `L × (flat ? 0.4 Q_perp + 0.6 Q_side : Q_perp)` | 2 | 成功抬升后，两指连线越垂直于柄轴得分越高；平放样本还奖励抓姿接近方向与桌面内柄轴侧向对齐。引导横向夹柄，并在平放时偏好从两侧接近的抓姿。 |
+| distance | `L × clip((p_grip − p_head)·h_A / distance_ref, 0, 1)` | 1 | 成功抬升后，抓取中心沿柄轴正向距锤头越远，得分越高，达到参考距离后饱和；引导在锤柄上选择远离锤头的位置，增大有效力臂。 |
+| stability | `I_H × S(x)`，分段线性插值与指数衰减，见下文 | 20 | 实时持锤条件 H 成立时，闭合结束与 B 两点之间锤子相对夹爪的平移、旋转差越小，得分越高；引导抓姿减少搬运后的滑移和转动，并在评分结束时保持有效持锤。 |
+| force | `peak_force / 10`，有效命中峰值保留 | 30 | 评分时窗内满足 H 且锤头有效命中目标端盖时，压缩法向力峰值越大，奖励越高；引导选择能将挥击转化为较大目标法向冲击力的抓姿，历史得分在随后掉落时保留。 |
+| task_success | `I_H × I[valid_strike > 0]`，撤离前终值 | 100 | 曾有效命中，且卸载结束、开始撤离前仍满足 H 时奖励；引导完成抓取、抬升、保持、命中并持锤至卸载结束的完整任务。 |
+| drop | `I_dropped`，锁存 | −20 | 成功抬升后，在掉落检测时窗内双侧接触条件连续不成立至少 20 ms 时锁存惩罚，恢复接触也不撤销；引导避免搬运、挥击和卸载期间失去有效夹持。 |
 
 **朝向**：`h_A` 是 A 时刻锤体局部 +X 的世界系柄轴，`c_A` 是 narrow 指尖到 wide 指尖的单位向量。`Q_perp = clip(1 − (c_A·h_A)², 0, 1)`。抓取前缓存姿态对应的柄轴为 `h_0`，桌面法向为世界 +Z，`d_side = normalize(n_table × h_0)`；最终抓姿 final_quat 对应的 mount 局部 +Z 接近方向为 a，`Q_side = clip((a·d_side)², 0, 1)`。仅 `placement == 0` 的平放样本使用侧向分，不要求夹指朝某个固定正方向，也不改变接近轨迹。
 
@@ -222,11 +222,11 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 | 指标 | 含义 | 数值范围及解读 |
 | --- | --- | --- |
 | `Curriculum/placement/success_rate_*`（上表四类） | 每类最近最多 512 个已完成尝试的原始二值 `task_success` 均值；仅教师训练。 | `[0,1]`；完整成功表示抓取、保持、有效命中且卸载结束前仍持有。空历史的 `0.5` 是启动先验，不是实测成功率；初始化和恢复后的零长度回合不计入。 |
-| `Curriculum/placement/probability_*`（上表四类） | 由各类完整成功缺口及成功回合力度缺口计算的下次 reset 目标概率；仅教师训练。 | 默认各类在 `[0.125,0.45]` 内且总和为 1，首次各为 `0.25`。M 个重置环境的预期类别数量为 `M*q_k`，实际数量可波动，不是已分配的整数环境数。 |
+| `Curriculum/placement/probability_*`（上表四类） | 由各类完整成功缺口及成功回合力度缺口计算的下次 reset 目标概率；仅教师训练。 | 默认各类在 `[0.075,0.775]` 内且总和为 1，首次各为 `0.25`；固定保底合计 30%，剩余 70% 动态分配，实际概率经平滑逐步接近目标。M 个重置环境的预期类别数量为 `M*q_k`，实际数量可波动，不是已分配的整数环境数。 |
 | `Curriculum/placement/strength_deficit_*` / `Curriculum/placement/success_samples_*` | 每类成功回合的力度缺口 / 历史窗口内完整成功样本数。 | 缺口在 `[0,1]`；成功样本不足 32 条时置零。样本数为 `[0,512]` 的整数。 |
 | `Episode_Termination/attempt_complete` | 本次重置的环境中，满足 `episode_length_buf >= 1` 的数量，表示一次尝试正常结束。 | 单次统计为整数 `[0, num_envs]`；日志还会对本轮各次统计求均值，因此格式可带小数。当前 128 个并行环境每步都结束一个回合，通常为 128；它是**结束数量**，不是成功数量，也不是百分比。 |
 
-教师从第一次 reset 起同时开放四类训练摆放。课程在 reset 事件和动作评分清零前读取旧场景及最终结果，每类保留最近 512 条 `task_success`、`peak_force`、`impact_impulse`，不按迭代均值统计。默认四类各满 256 条前均分，此后每 10 个完成批次更新概率。完整成功样本至少 32 条时，以成功回合峰值力、冲量中位数 F、J 计算 `d_strength = 0.7 × 100/(F+100) + 0.3 × impulse_scale/(J+impulse_scale)`，否则为零；`d_success = clip((0.9-p_k)/0.9, 0, 1)`，优先级为 `d_success + 0.5(1-d_success)d_strength`。令 score 为优先级平方，按 `0.125 + 0.5 × score/sum(score)` 分配（全零时均分），将超过 0.45 的份额均分给其余类，再以 0.3 的系数平滑更新概率。每个训练场景权重为 `q_k/该类训练场景数`，评估场景权重为零。参数以 `run_config.json` 的 `placement_sgs` 为准；checkpoint 保存并恢复历史、概率及完成批次计数。
+教师从第一次 reset 起同时开放四类训练摆放。课程在 reset 事件和动作评分清零前读取旧场景及最终结果，每类保留最近 512 条 `task_success`、`peak_force`、`impact_impulse`，不按迭代均值统计。默认四类各满 256 条前均分，此后每 10 个完成批次更新概率。完整成功样本至少 32 条时，以成功回合峰值力、冲量中位数 F、J 计算 `d_strength = 0.7 × 100/(F+100) + 0.3 × impulse_scale/(J+impulse_scale)`，否则为零；`d_success = clip((0.9-p_k)/0.9, 0, 1)`，优先级为 `d_success + 0.5(1-d_success)d_strength`。令 score 为优先级平方，按 `0.075 + 0.70 × score/sum(score)` 分配（全零时均分），即每类保底 7.5%、合计保底 30%，剩余 70% 动态分配；保留将超过 0.775 的份额均分给其余类的逻辑，再以 0.3 的系数平滑更新概率。每个训练场景权重为 `q_k/该类训练场景数`，评估场景权重为零。参数以 `run_config.json` 的 `placement_sgs` 为准；checkpoint 保存并恢复历史、概率及完成批次计数。
 
 `attempt_complete` 配置为正常 terminal，`time_out=False`，环境还设置 `is_finite_horizon=True`；抬升失败、掉落、未命中同样执行到完整环境步结束，不产生独立的失败终止日志。PPO 不将下一次 reset 后的初始状态作为本次尝试的 bootstrap 价值。
 

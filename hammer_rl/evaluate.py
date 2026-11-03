@@ -30,7 +30,6 @@ def main():
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--viewer", choices=("native",))
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--noise", action="store_true")
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
     parser.add_argument("--output", type=Path, help="逐样本原始指标 npz，建议放在 weight/ 下")
@@ -57,7 +56,7 @@ def main():
         args.hammer_head_extra_mass = saved["hammer_head_extra_mass"]
     count = 1 if args.viewer else min(args.num_envs, args.episodes)
     cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=stage,
-        num_envs=count, split=args.split, seed=args.seed, training=False)
+        num_envs=count, split=args.split, seed=None, training=False)
     # 对照默认使用相同名义物理参数；--noise 同时用于 zero/teacher/student。
     cfg.randomize_physics = False
     cfg.events.pop("physics", None)
@@ -98,8 +97,7 @@ def main():
                 selected = [pairs[i % len(pairs)] for i in range(first, first + count)]
                 scene, candidate = torch.tensor(selected, device=env.device).unbind(-1)
                 env.hammer.selection = (scene, candidate)
-                # 每批使用确定种子，使冻结观测噪声也可复现。
-                env.reset(seed=args.seed + first)
+                env.reset()
                 if viewer is not None:
                     sync_data(env, data)
                 # 环境会保留本批生成的状态张量，供下一批在上下文外 reset。
