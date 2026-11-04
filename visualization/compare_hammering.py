@@ -1,7 +1,6 @@
-"""每轮重新生成六个场景：三个使用训练策略，三个使用深入 30 mm 的 AnyGrasp。"""
+"""每轮三个缓存场景成对展示：学习选择＋残差，与共享候选集的 AnyGrasp 零残差。"""
 
 import argparse
-from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -9,22 +8,22 @@ import mujoco
 import numpy as np
 import torch
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
+from mjlab.rl import RslRlVecEnvWrapper
 
 from hammer_rl.env_cfg import make_env_cfg
-from hammer_rl.prepare import prepare_scene
-from hammer_rl.rl_cfg import ppo_cfg
+from hammer_rl.inference import load_models, select_candidates
 from visualization.parallel_hammering import ParallelHammeringViewer
 
 PLACEMENTS = ("flat", "lean_head_down", "lean_head_up", "inverted")
 
 
 class ComparisonHammeringViewer(ParallelHammeringViewer):
-    def __init__(self, env, policy, spacing, placement, checkpoint, hammer_head_extra_mass):
-        super().__init__(env, policy, spacing)
+    def __init__(self, env, actor, critic, spacing, placement, checkpoint):
+        self.actor, self.critic = actor, critic
+        self.action = torch.zeros((env.num_envs, 6), device=env.device)
+        super().__init__(env, lambda observations: self.action, spacing)
         self.placement = placement
         self.checkpoint = checkpoint
-        self.hammer_head_extra_mass = hammer_head_extra_mass
         self.offsets[3:, 1] = -spacing
         self.cfg.azimuth = 90.0
         self.cfg.elevation = -50.0
@@ -32,19 +31,22 @@ class ComparisonHammeringViewer(ParallelHammeringViewer):
         self.cfg.distance *= 0.8
         self._show_debug_vis = False
 
-    def _execute_step(self):
-        # prepare_scene 每次调用 AnyGrasp，并沿接近方向额外深入 0.03 m。
-        rng = np.random.default_rng()
-        samples, candidates = zip(*(prepare_scene(rng, PLACEMENTS.index(self.placement),
-            1, self.hammer_head_extra_mass) for _ in range(self.env.num_envs)))
-        arrays = {key: np.stack([sample[key] for sample in samples]) for key in samples[0]}
-        arrays.update({key: np.stack([candidate[0][key] for candidate in candidates])
-                       for key in candidates[0][0]})
-        self.env.unwrapped.hammer.bank = {
-            key: torch.as_tensor(value, device=self.env.device,
-                dtype=torch.float32 if value.dtype.kind == "f" else None)
-            for key, value in arrays.items()}
+    def _prepare_round(self):
+        bank = self.env.unwrapped.hammer.bank
+        scenes = ((bank["placement"] == PLACEMENTS.index(self.placement))
+                  & (bank["split"] == (self.env.cfg.split == "eval"))).nonzero().flatten()
+        scene = scenes[torch.randint(len(scenes), (3,), device=self.env.device)]
+        sdk = torch.stack([start + bank["scores"][start:end].argmax()
+                           for start, end in zip(bank["offsets"][scene], bank["offsets"][scene + 1])])
+        self.env.unwrapped.hammer.selection = (scene.repeat(2), sdk.repeat(2))
         self.env.reset()
+        result = select_candidates(self.env.unwrapped, self.actor, self.critic,
+                                   torch.arange(3, device=self.env.device))
+        self.action.zero_()
+        self.action[:3] = result["action"]
+
+    def _execute_step(self):
+        self._prepare_round()
         result = super()._execute_step()
         self.pause()
         return result
@@ -59,12 +61,15 @@ class ComparisonHammeringViewer(ParallelHammeringViewer):
         values = torch.stack((term.values["peak_force"], reward), dim=-1).cpu().tolist()
         names = [f"{'Trained' if i < 3 else 'AnyGrasp'} {i % 3 + 1}  "
                  for i in range(self.env.num_envs)]
-        numbers = [f"{force:.3f} N | {total:.4f}" for force, total in values]
+        scene = self.env.unwrapped.hammer.scene_id.cpu().tolist()
+        candidate = self.env.unwrapped.hammer.candidate_id.cpu().tolist()
+        numbers = [f"S{s} C{c} | {force:.3f} N | {total:.4f}"
+                   for s, c, (force, total) in zip(scene, candidate, values)]
         phase = "Final" if term._substep == self.env.cfg.decimation else "Running"
         viewer.set_texts((mujoco.mjtFontScale.mjFONTSCALE_100.value,
             mujoco.mjtGridPos.mjGRID_TOPLEFT.value,
             "\n".join([self.placement, "Environment", *names, "Enter: new grasps"]),
-            "\n".join([self.checkpoint, "Peak force | Total reward", *numbers, phase])))
+            "\n".join([self.checkpoint, "Scene Candidate | Peak force | Total reward", *numbers, phase])))
 
     def _add_env_selection_marker(self, viewer):
         # 标签与网格使用相同平移，切换所选环境时仍对应各自场景。
@@ -99,23 +104,9 @@ def main():
     env = ManagerBasedRlEnv(cfg, device=args.device)
     try:
         wrapper = RslRlVecEnvWrapper(env)
-        indices = torch.arange(env.num_envs, device=env.device)
-        env.hammer.selection = (indices, indices)
-        runner = MjlabOnPolicyRunner(wrapper,
-            asdict(ppo_cfg("teacher" if stage == "teacher" else "student")),
-            log_dir=None, device=args.device)
-        loaded = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
-        actor = loaded["student_state_dict"] if stage == "distill" else loaded["actor_state_dict"]
-        runner.alg.load({"actor_state_dict": actor}, {"actor": True}, strict=True)
-        policy = runner.get_inference_policy()
-
-        def comparison_policy(observations):
-            action = torch.zeros((env.num_envs, wrapper.num_actions), device=env.device)
-            action[:3] = policy(observations[:3])
-            return action
-
-        viewer = ComparisonHammeringViewer(wrapper, comparison_policy, args.spacing,
-            args.placement, args.checkpoint.name, saved["hammer_head_extra_mass"])
+        actor, critic = load_models(args.checkpoint, args.device)
+        viewer = ComparisonHammeringViewer(wrapper, actor, critic, args.spacing,
+            args.placement, args.checkpoint.name)
         with torch.inference_mode():
             viewer.run()
     finally:

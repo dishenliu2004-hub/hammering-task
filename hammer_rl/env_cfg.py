@@ -117,7 +117,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         # 单次尝试结束即 terminal，奖励不乘 dt。
         auto_reset=True, is_finite_horizon=True, scale_rewards_by_dt=False,
         actions={"grasp": action}, events=events,
-        # 教师/critic 使用特权状态；学生 actor 使用公开数值和深度。
+        # 教师使用特权状态；学生 actor/critic 使用公开数值和深度。
         observations={
             "privileged": ObservationGroupCfg(terms={"initial": ObservationTermCfg(func=observations.privileged)}),
             "public_seed": ObservationGroupCfg(terms={"initial": ObservationTermCfg(func=observations.public_seed)}),

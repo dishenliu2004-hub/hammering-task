@@ -1,6 +1,6 @@
 # 锤击任务强化学习操作指南
 
-训练流程：**离线准备数据 → 教师 PPO → 教师向学生蒸馏 → 学生 PPO 微调**。
+训练流程：**离线准备数据 → 教师 PPO → 教师向学生蒸馏 → 学生 PPO 微调 → 固定 actor 校准评分器**。
 
 所有命令均在项目根目录 `/home/ubuntu20/CodeMujoco/hammering-task` 执行。
 请使用 `python -m hammer_rl.train` 等模块命令，不要直接执行 `python hammer_rl/train.py`。
@@ -41,7 +41,8 @@ python -m hammer_rl.prepare \
 仅教师训练启用动态分配 SGS，仅使用训练样本统计。每类保留最近 512 个已完成尝试，
 每条保存 `task_success`、`peak_force`（N）、`impact_impulse`（N·s）。
 `task_success` 表示抓取、保持、有效命中且卸载结束前仍持有的完整任务成功，
-不使用总奖励或单独的抬升成功率；`force` 奖励仍是归一化冲量评分。
+课程不使用总奖励或单独的抬升成功率；`force` 奖励为 `peak_force / 10`，
+权重为 30，即每 1 N 有效峰值力贡献 3 分；冲量用于指标和课程力度统计。
 空历史的成功率为 0.5，初始概率四类均为 0.25。
 
 课程参数保存在 `run_config.json` 的 `placement_sgs`，由现有课程项的 `params` 使用：
@@ -123,7 +124,7 @@ python -m hammer_rl.train \
 python -m hammer_rl.train \
   --stage distill \
   --data-file weight/hammer_rl/reset_bank_256.npz \
-  --teacher-checkpoint weight/hammer_rl/runs/teacher/formal_01/model_2999.pt \
+  --teacher-checkpoint weight/hammer_rl/runs/teacher/formal_02/model_2999.pt \
   --num-envs 128 \
   --max-iterations 1000 \
   --device cuda:0 \
@@ -140,7 +141,8 @@ weight/hammer_rl/runs/distill/formal_01/model_999.pt
 ## 5. 学生 PPO 微调
 
 从蒸馏权重初始化学生 actor，再进行 PPO 训练。学生 actor 使用深度图和公开抓取候选信息，
-critic 仍使用特权观测；此阶段默认开启物理随机化和深度噪声。
+critic 也使用相同的深度和公开观测，输出一个价值，无动作分布。
+actor 与 critic 使用各自的 CNN 和归一化统计；此阶段默认开启物理随机化和深度噪声。
 
 ```bash
 python -m hammer_rl.train \
@@ -163,6 +165,37 @@ weight/hammer_rl/runs/student/formal_01/model_2999.pt
 以上 3000 / 1000 / 3000 是项目提供的初始训练规模，不保证收敛。
 若调整迭代数或使用续训，请以程序结束时打印的 `checkpoint:` 路径为准，
 并同步修改下一阶段的输入权重路径。
+
+### 5.1 固定 actor 校准候选评分器
+
+教师和学生 PPO 仍随机采样一个候选训练。部署前固定最终 actor，逐个训练候选执行
+actor 的确定性残差，以当前实际总奖励为标签，仅通过 MSE 更新 critic。
+校准沿用对应阶段的随机化，双方观测归一化统计保持固定；重复执行分别保存观测与回报。
+“最高分”表示预测的微调后总奖励最高，不等同于抓取成功率最高。
+
+```bash
+python -m hammer_rl.calibrate \
+  --checkpoint weight/hammer_rl/runs/student/formal_01/model_best.pt \
+  --num-envs 16 \
+  --repeats 1 \
+  --epochs 20 \
+  --batch-size 256 \
+  --learning-rate 3e-4 \
+  --device cuda:0
+```
+
+也可将 checkpoint 换为已训练的教师，例如 `weight/hammer_rl/runs/teacher/formal_02/model_best.pt`。
+默认只采集该缓存的训练划分，不使用留出的评估场景；`--data-file` 可指定缓存，
+`--episodes 4 --epochs 1 --num-envs 4` 可限制为短运行。
+默认输出到源 checkpoint 同目录的 `calibration_model_best/`，可用 `--output-dir` 指定新目录：
+
+- `samples.pt`：执行前的 critic 输入、本次实际奖励、场景及候选编号。
+- `deployment.pt`：配套 actor、校准后的 critic 及各自模型内的归一化统计。
+- `run_config.json`：模型配置及本次校准参数。
+
+`deployment.pt` 用于推理和评估，不包含 PPO 优化器状态，不用于 `--resume`。
+actor 更新后，应重新校准。蒸馏 checkpoint 包含学生、教师和优化器状态，但没有 critic，仍是中间产物；
+完整学生部署模型需要后续新版学生 PPO 和校准。不自动迁移旧的特权学生 critic。
 
 三个阶段还会在运行目录保留 `model_best.pt`：教师和学生 PPO 按本轮
 `Train/total_reward` 最高选优（多个采集步取均值），蒸馏按本轮 `Loss/behavior`
@@ -188,28 +221,29 @@ tensorboard --logdir weight/hammer_rl/runs/teacher/formal_02 --port 6006
 该曲线从使用修改后脚本启动或继续训练时开始记录。
 
 训练目录包含 TensorBoard 日志、`model_*.pt` 权重和 `run_config.json` 配置。
-默认每 50 次更新保存权重，正常结束时也会保存最终权重。
+新训练默认教师和学生 PPO 每 100 次更新保存权重，蒸馏每 50 次；
+续训以该目录 `run_config.json` 中的 `rl.save_interval` 为准。正常结束时也会保存最终权重。
 每次新实验使用新的 `--log-dir`（例如 `formal_02`）；省略该参数时会自动创建时间戳目录。
 
 ## 7. 中断后继续训练
 
-同一阶段继续训练使用 `--resume`。例如新策略教师已保存包含完整课程状态的
-`model_1499.pt`，追加训练 1500 次更新：
+同一阶段继续训练使用 `--resume`。例如从已保存完整课程状态的教师
+`finish_01/model_best.pt` 追加训练 3000 次更新：
 
 ```bash
 python -m hammer_rl.train \
   --stage teacher \
-  --resume weight/hammer_rl/runs/teacher/formal_01/model_600.pt \
+  --resume weight/hammer_rl/runs/teacher/finish_01/model_best.pt \
   --num-envs 256 \
-  --max-iterations 2000 \
-  --device cuda:0 \
-  --seed 42
+  --max-iterations 3000 \
+  --device cuda:0
 ```
 
 - 将 `--resume` 替换为实际存在的 checkpoint 路径；蒸馏和学生阶段也可用相同方式续训。
 - `--max-iterations` 始终表示**本次追加的更新次数**，不是累计目标次数。
 - 续训会在原权重目录写入结果，并从该目录的 `run_config.json` 恢复阶段、
-  数据路径、锤头额外质量、教师 SGS 参数和算法配置。保留权重旁的配置文件。
+  数据路径、锤头额外质量、教师 SGS 参数和算法配置。保留权重旁的配置文件；
+  同时传入 `--log-dir` 也不会改变续训输出目录。
 - 新策略教师周期和最终 checkpoint 均通过 `infos["placement_sgs"]` 保存 `history`、
   `probabilities`、`completed_batches`；普通续训恢复全部课程状态。初始化或恢复后的
   零长度 reset 不追加历史、不增加计数、不平滑概率，但仍把当前概率应用到场景权重。
@@ -217,39 +251,13 @@ python -m hammer_rl.train \
 - `--teacher-checkpoint` 用于首次启动蒸馏，`--init-from` 用于首次启动学生 PPO；
   同阶段恢复时使用 `--resume`。
 
-从旧 SGS 教师模型切换时，先选定源 checkpoint，再将它和旁边的 `run_config.json`
-复制到新的实验目录，以保留源实验。以下变量须替换为实际路径和唯一目录名：
-
-```bash
-SOURCE_CHECKPOINT=/实际旧教师训练目录/model_实际编号.pt
-DEST_RUN=weight/hammer_rl/runs/teacher/placement_deficit_本次唯一标识
-mkdir -p "$DEST_RUN"
-cp "$SOURCE_CHECKPOINT" "$DEST_RUN/"
-cp "$(dirname "$SOURCE_CHECKPOINT")/run_config.json" "$DEST_RUN/"
-
-python -m hammer_rl.train \
-  --stage teacher \
-  --resume "$DEST_RUN/$(basename "$SOURCE_CHECKPOINT")" \
-  --reset-placement-sgs \
-  --num-envs 128 \
-  --max-iterations 追加更新次数 \
-  --device cuda:0 \
-  --seed 42
-```
-
-`--resume` 始终在 checkpoint 所在目录继续保存，同时传 `--log-dir` 也不会换目录。
-旧格式课程状态不支持直接普通续训，必须显式重置；之后恢复新生成的 checkpoint，
-使用普通 `--resume`，不要再带 `--reset-placement-sgs`，否则会再次清空课程。
-
 ## 8. 可视化回放
-
-### 8.1 六场景同步对比
 
 ```bash
 cd /home/ubuntu20/CodeMujoco/hammering-task
 
 python -m visualization.compare_hammering \
-  --checkpoint weight/hammer_rl/runs/teacher/formal_01/model_best.pt \
+  --checkpoint weight/hammer_rl/runs/teacher/finish_01/model_best.pt \
   --placement flat \
   --split eval \
   --device cuda:0
@@ -264,20 +272,75 @@ python -m visualization.compare_hammering \
 | `lean_head_up` | 斜靠，锤头朝上 |
 | `inverted` | 倒立 |
 
-程序从指定类型中按种子选择三个不同场景，每个场景取 SDK 最高分候选；
-上排使用训练策略，下排使用相同初态和相同候选的 AnyGrasp 零残差基线，逐列配对。
+程序每轮从缓存的指定放置类型和 `--split` 划分中随机抽取三个场景，允许重复，复用缓存候选。
+默认读取 checkpoint 旁配置中的数据路径，`--data-file` 可指定其他缓存；
+当前准备脚本生成的候选已沿接近方向额外深入 30 mm，回放时不再生成候选或增加该偏移。
+上排由 critic 选择候选并由 actor 微调，下排使用同场景、同候选集合的 SDK 最高分零残差，逐列配对。
 场景标签 `T1/T2/T3` 和 `A1/A2/A3` 分别对应训练组和基线组。
 窗口同时显示六个环境的场景编号、敲击峰值力（N）和加权总奖励；执行中数值随阶段更新，
-完成后暂停并保留最终画面与数值，按 **回车** 重播同三组对照。
+完成后暂停并保留最终画面与数值，按 **回车** 从缓存重新抽样再比较。
 
-## 9. 四类放置的奖励与 SDK 对比 CSV
+## 9. 四类放置的命中率与峰值力对比 CSV
 
 在项目根目录、已激活 `hammer` 环境后，只需指定要对比的权重：
 
 ```bash
 python -m hammer_rl.compare_evaluations \
-  --checkpoint weight/hammer_rl/runs/teacher/formal_01/model_best.pt
+  --checkpoint weight/hammer_rl/runs/teacher/finish_01/model_best.pt \
+  --data-file weight/hammer_rl/eval_bank_128.npz \
+  --anygrasp-extra-depth 0.03
 ```
+
+分别运行 SDK 最高分＋零残差、critic 选择＋actor 残差两组，每组每场景执行一次。
+省略 `--data-file` 时使用 `reset_bank_256.npz` 留出的 52 个场景，每场景 32 个候选；
+上例指定的 `eval_bank_128.npz` 包含四类放置各 32 个测试场景，每场景 32 个候选。
+候选经过 AnyGrasp NMS，再以最高分位姿为起点，按平移和旋转距离做最远点采样。
+可用 `--episodes 4 --num-envs 4` 做短运行，或 `--data-file` 指定其他多候选缓存。
+
+默认输出到 checkpoint 同目录的 `comparison_<checkpoint文件名去扩展名>/`，
+可用 `--output-dir` 指定目录。最终仅生成 `metrics_comparison.csv`，按四类放置保存两组的
+有效命中率（`valid_strike` 的均值，百分比）、平均有效峰值力（`peak_force` 的均值，N）
+以及训练策略减 SDK 基线的差值；命中率差值单位为百分点。峰值力均值包含未命中的零值。
+过程中的 `zero.npz` 和 `trained.npz` 在读取后删除，不生成 `selected.npz` 或 `trained_rewards.csv`。
+两组按同一场景顺序配对，候选编号允许不同；此对比同时包含候选选择和 actor 微调的效果，
+不分别报告二者的收益，也不导出抓取成功率、完整任务成功率或奖励明细。
+`--anygrasp-extra-depth` 只调整 SDK 基线的额外深入量，训练策略沿用缓存中的候选深度。
+
+单独评估学习选择：
+
+```bash
+python -m hammer_rl.evaluate \
+  --data-file weight/hammer_rl/reset_bank_256.npz \
+  --policy trained --selection learned \
+  --checkpoint weight/hammer_rl/runs/teacher/formal_02/calibration_model_best/deployment.pt \
+  --split eval --episodes 0 --num-envs 16 --headless \
+  --output weight/hammer_rl/selected_eval.npz
+```
+
+`--selection all` 是原有逐候选评估，也是默认值；`sdk` 和 `learned` 每场景执行一次。
+`learned` 使用包含 actor 和 critic 的教师/学生 PPO 或部署权重；`all/sdk` 仍支持蒸馏 actor。
+评估默认名义物理参数，`--noise` 开启深度噪声，`--seed` 默认 42。
+
+### 9.1 学生在线推理接口
+
+```python
+from hammer_rl.inference import load_models, select_grasp
+
+actor, scorer = load_models("weight/hammer_rl/runs/student/formal_01/calibration_model_best/deployment.pt")
+result = select_grasp(actor, scorer, depth, scene, grasps)
+```
+
+`depth` 为米单位 `(1, 120, 160)` 深度；`scene` 包含未批量的 `finger_pos`、`finger_vel`、
+`camera_pos`、`camera_quat`、`intrinsics`、`target_pos`、`target_quat`，字段与训练公开观测一致。
+位姿使用世界坐标，四元数为 wxyz，内参顺序为 fx、fy、cx、cy。
+手指状态使用与 reset 中按模型关节顺序取得的相同顺序。
+`grasps` 沿用 `generate_grasps` 返回的世界坐标候选字典，内部复用
+`candidate_to_mount(..., extra_depth=0.03)`，不读取仿真锤子真值。
+
+返回张量包含 `candidate_index`（输入集合内编号）、`score`、所有候选 `scores`、
+6 维原始 `action`、最终 `mount_pos/mount_quat`、`pregrasp_pos`、`width` 和 `gripper_open_ctrl`。
+除全部候选评分外，单场景结果保留首维 1；CPU 执行器可取第 0 项并转换为 NumPy 使用最终位姿和开合量。
+教师评分继续使用特权观测，通过仿真内的 `select_candidates` 入口调用。
 
 ## 10. 常用参数与操作提示
 
@@ -298,6 +361,7 @@ python -m hammer_rl.compare_evaluations \
 - 现有 `runs/*/smoke/` 权重仅验证流程，不代表已收敛策略。
 - 256 场景、每场景最多 32 个候选是初始规模；是否需要更多数据或更新次数，依据评估结果决定。
 
-相关实现：[训练入口](train.py)、[数据准备](prepare.py)、[评估入口](evaluate.py)、
+相关实现：[训练入口](train.py)、[数据准备](prepare.py)、[评分校准](calibrate.py)、
+[选择与微调](inference.py)、[评估入口](evaluate.py)、
 [网络和算法配置](rl_cfg.py)、[环境配置](env_cfg.py)、[四类对比](compare_evaluations.py)、
 [六场景展示](../visualization/compare_hammering.py)。

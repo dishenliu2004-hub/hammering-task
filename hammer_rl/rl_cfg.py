@@ -20,12 +20,15 @@ def student_model():
 
 
 def ppo_cfg(stage="teacher"):
+    critic = (RslRlModelCfg(hidden_dims=(256, 128, 64), activation="elu", obs_normalization=True)
+              if stage == "teacher" else student_model())
+    critic.distribution_cfg = None
     return RslRlOnPolicyRunnerCfg(num_steps_per_env=1, max_iterations=5000, save_interval=100,
         experiment_name=stage, logger="tensorboard", upload_model=False,
         actor=teacher_model() if stage == "teacher" else student_model(),
-        critic=RslRlModelCfg(hidden_dims=(256, 128, 64), activation="elu", obs_normalization=True),
+        critic=critic,
         obs_groups={"actor": ("privileged",) if stage == "teacher" else ("depth", "public_seed"),
-                    "critic": ("privileged",)},
+                    "critic": ("privileged",) if stage == "teacher" else ("depth", "public_seed")},
         algorithm=RslRlPpoAlgorithmCfg(learning_rate=3e-4))
 
 

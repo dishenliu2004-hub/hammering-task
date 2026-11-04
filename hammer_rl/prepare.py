@@ -143,10 +143,32 @@ def prepare_scene(rng, placement, candidates_per_scene, hammer_head_extra_mass=0
                                    convert_first=False)
     finally:
         camera.close()
-    count = min(candidates_per_scene, len(grasps["scores"]))
+    candidates = _prepare_candidates(grasps, sample, candidates_per_scene)
+    del simulation
+    return sample, candidates
+
+
+def _select_grasps(grasps, count):
+    """从最高分候选开始，在已有 NMS 结果中按平移和旋转距离覆盖采样。"""
+    order = np.argsort(-grasps["scores"], kind="stable")
+    positions = grasps["translations"][order]
+    rotations = Rotation.from_matrix(grasps["rotations"][order])
+    distances = np.full(len(order), np.inf)
+    selected = []
+    for _ in range(min(count, len(order))):
+        i = distances.argmax()
+        selected.append(order[i])
+        distance = (np.sum((positions - positions[i]) ** 2, axis=1) / 0.03 ** 2
+                    + (rotations[i].inv() * rotations).magnitude() ** 2 / (np.pi / 6) ** 2)
+        distances = np.minimum(distances, distance)
+        distances[i] = -np.inf
+    return np.asarray(selected, dtype=np.int64)
+
+
+def _prepare_candidates(grasps, sample, candidates_per_scene):
     object_rot = Rotation.from_quat(sample["hammer_quat"][[1, 2, 3, 0]])
     candidates = []
-    for i in range(count):
+    for i in _select_grasps(grasps, candidates_per_scene):
         pose = candidate_to_mount(grasps, i, extra_depth=0.03)
         rotation = Rotation.from_quat(pose["mount_quat"][[1, 2, 3, 0]])
         candidates.append(dict(
@@ -154,8 +176,7 @@ def prepare_scene(rng, placement, candidates_per_scene, hammer_head_extra_mass=0
             local_quat=(object_rot.inv() * rotation).as_quat()[[3, 0, 1, 2]],
             open_ctrl=pose["gripper_open_ctrl"],
             **{name: grasps[name][i] for name in grasps}))
-    del simulation
-    return sample, candidates
+    return candidates
 
 
 def _prepare_scene_task(index, seed, candidates_per_scene, hammer_head_extra_mass):

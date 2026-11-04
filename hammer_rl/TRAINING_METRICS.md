@@ -10,11 +10,13 @@
 | --- | --- | --- |
 | `teacher` | `MLPModel`：87 维 `privileged` → 隐藏层 `(512, 256, 128)` → 6 维高斯均值。 | critic：87 维 `privileged` → 隐藏层 `(256, 128, 64)` → 1 维价值；使用 PPO。 |
 | `distill` | 学生 `CNNModel` 使用 `depth` 和 50 维 `public_seed`，教师使用上述特权 MLP。 | 无 critic；固定教师，最小化学生与教师的 6 维确定性输出之间的 MSE。采集时执行学生采样动作。 |
-| `student` | 与蒸馏学生相同的 `CNNModel`，从蒸馏 checkpoint 初始化 actor。 | critic 与教师 PPO 的结构相同，仍使用特权观测；重新通过 PPO 微调。 |
+| `student` | 与蒸馏学生相同的 `CNNModel`，从蒸馏 checkpoint 初始化 actor。 | 独立 `CNNModel` 使用相同深度和公开观测，输出 1 维价值、无动作分布；重新通过 PPO 微调。 |
 
 学生深度输入的单样本形状为 `(1, 120, 160)`，依次经过三层卷积：通道数 `(16, 32, 32)`、卷积核 `(5, 3, 3)`、步长 `(4, 2, 2)`，无 padding、无池化。特征形状依次为 `(16, 29, 39)`、`(32, 14, 19)`、`(32, 6, 9)`；展平为 1728 维，与 50 维公开观测拼接后进入隐藏层 `(256, 128, 64)`，输出 6 维高斯均值。
 
 上述隐藏层和卷积层均使用 ELU。教师 actor、两个 PPO 阶段的 critic 和学生的一维公开观测均开启观测归一化；学生深度图直接进入 CNN，不通过该一维运行统计归一化器。当前没有 RNN 或跨尝试的隐藏状态。
+
+部署前通过 `python -m hammer_rl.calibrate` 冻结最终 actor，以训练候选执行确定性残差后的实际总奖励为标签，仅用 MSE 校准 critic。actor 参数和双方归一化统计保持不变。候选评分预测微调后的总奖励，选择时对场景内候选取 argmax；该阶段不改变 PPO 或蒸馏损失。部署权重包含配套 actor 和 critic，蒸馏权重仍只用于动作初始化或单候选评估。
 
 `public_seed` 包含初始候选位姿、候选宽度和开爪控制量、预抓位姿、手指关节位置/速度、相机位姿/内参及目标端面位姿。`privileged` 在此基础上追加锤子世界位姿及相对候选位姿、锤头中心、支撑物位姿/尺寸、质量、惯量和指面摩擦。观测均在 reset 时生成并冻结，不包含本次尝试的结果快照。
 
@@ -47,7 +49,7 @@
 | `Mean episode length` | 最近最多 128 个已结束回合的平均环境步数。 | 当前有效回合恒为 `1`。单位是环境步，不是秒，也不是 8980 个物理子步。 |
 | `Mean action std` | 策略高斯动作分布在各动作维度上的标准差均值，描述探索幅度。 | 当前默认 `[10⁻⁶, 10⁶]`，初值为 `0.3`。这是 `tanh` 前无量纲动作的标准差，不是 `0.30 m` 或 `0.30 rad`；策略输出随后经过 `tanh` 并缩放为抓取残差。 |
 
-当前动作先经过 `tanh`，再在候选抓取的局部坐标系中施加残差：平移各轴尺度为 `0.05 m`，旋转向量各分量尺度为 `π/30 rad`（6°）。这是每个分量的尺度，标准差本身不等于执行后的米制或角度误差；熵和 PPO 动作概率也均对应 `tanh` 前的高斯分布。
+当前动作先经过 `tanh`，再在候选抓取的局部坐标系中施加残差：平移各轴尺度为 `0.10 m`，旋转向量各分量尺度为 `π/5 rad`（36°）。这是每个分量的尺度，标准差本身不等于执行后的米制或角度误差；熵和 PPO 动作概率也均对应 `tanh` 前的高斯分布。
 
 `Mean value loss`、`Mean surrogate loss`、`Mean entropy loss` 只属于两个 PPO 阶段。当前 PPO 初始学习率 `3e-4`，Adam 优化器，每轮 `5` 个 epoch、每个 epoch `4` 个 mini-batch；默认 128 环境时每批 32 条尝试，共 20 次梯度更新。采用自适应学习率，目标 KL 为 `0.01`，学习率调整边界为 `[1e-5, 1e-2]`；最大梯度范数为 `1.0`，优势默认在整轮采集数据上归一化。折扣 `gamma=0.99`、GAE `lam=0.95`，但当前每步为真实 terminal，不会跨尝试 bootstrap，单步目标回报就是本次奖励。
 
@@ -238,7 +240,7 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 - `wrap`、`stability`、`force` 是连续评分；例如 `stability=0.2` 不表示稳定成功率为 20%。只有单回合二值指标的均值才可直接读成比例。`seat_*` 的均值也只是各时点的顶靠比例，不等于抓持成功率。
 - 教师课程概率更新会改变采样分布，更新附近奖励或成功率回落不一定表示策略退化。蒸馏时应同时看 `Loss/behavior` 和实际任务指标；模仿误差下降不保证命中率同步上升。
 - 正式比较策略时，使用 `evaluate.py` 在相同缓存、划分、候选、随机种子和锤头额外质量下评估。该入口默认关闭物理随机化和深度噪声，`--noise` 可启用深度噪声。评估执行确定性均值，训练执行高斯采样，二者的均值无需完全相等。
-- `compare_evaluations.py --checkpoint 权重路径` 自动读取运行配置并调用 `evaluate.py` 分别评估 SDK 基线和训练策略，使用 `--episodes 0` 遍历全部评估候选，再筛选每个场景 SDK 分数最高的一个候选，分别按四类放置汇总，仅导出 `trained_rewards.csv`（各项加权奖励和实际总奖励均值）与 `metrics_comparison.csv`（SDK/训练策略抓取成功率、敲击成功率和平均峰值力对比）。操作见 [训练指南第 10 节](README.md#10-四类放置的奖励与-sdk-对比-csv)。全候选均值、每场景最高分候选均值和带课程的训练均值属于不同统计集合。
+- `compare_evaluations.py --checkpoint 权重路径` 自动读取运行配置并调用 `evaluate.py`，分别以 `--selection sdk` 评估 SDK 最高分＋零残差、以 `--selection learned` 评估 critic 选择＋actor 残差。默认 `--episodes 0` 遍历全部评估场景，每组每场景执行一次，最终仅导出 `metrics_comparison.csv`，按四类放置汇总两组的有效命中率（百分比）、平均有效峰值力（N）及训练策略减 SDK 基线的差值；临时 NPZ 在读取后删除。该脚本不导出奖励或抓取成功率，也不分别衡量候选选择和 actor 微调的收益。操作见 [训练指南第 9 节](README.md#9-四类放置的命中率与峰值力对比-csv)。全候选均值、SDK 最高分候选均值、critic 所选候选均值和带课程的训练均值属于不同统计集合。
 
 范围和换算关系假设原始指标为有限值。底层奖励管理器会将非有限的加权奖励项置零，而训练 wrapper 直接读取指标日志；若原始指标出现 NaN/Inf，则加权日志与实际 reward 可能不再满足上述等式，应结合原始状态排查。
 
@@ -250,5 +252,5 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 - [奖励读取](mdp/rewards.py)、[终止条件](mdp/terminations.py)、[课程逻辑](mdp/curriculum.py)。
 - [观测读取](mdp/observations.py)、[重置与观测构造](mdp/resets.py)：87/50 维观测、冻结深度和随机化。
 - [网络与算法配置](rl_cfg.py)、[训练入口](train.py)：教师/学生网络、PPO/蒸馏参数、每次采集步数、课程命令行默认值，以及 `_RewardLogVecEnvWrapper` 的加权奖励日志覆盖逻辑。
-- [评估入口](evaluate.py)、[四类放置对比](compare_evaluations.py)：确定性评估、逐回合原始指标与 SDK 最高分候选统计。
+- [评估入口](evaluate.py)、[四类放置对比](compare_evaluations.py)：确定性评估、逐回合原始指标，以及 SDK 最高分与 critic 所选候选的对比统计。
 - 本机框架源码位于 `/home/ubuntu20/anaconda3/envs/hammer/lib/python3.11/site-packages/` 下：`mjlab/managers/{metrics,reward,termination}_manager.py` 定义底层日志聚合；`mjlab/rl/config.py` 定义 PPO 默认值；`rsl_rl/utils/logger.py` 定义吞吐、128 回合滑动窗口与打印；`rsl_rl/algorithms/{ppo,distillation}.py`、`rsl_rl/models/{mlp_model,cnn_model}.py`、`rsl_rl/modules/{distribution,cnn}.py` 定义损失、网络、熵与标准差边界。

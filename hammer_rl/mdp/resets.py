@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+from tensordict import TensorDict
 from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, quat_conjugate, quat_mul
 
@@ -60,49 +61,32 @@ def randomize_physics(env, env_ids):
     model.geom_friction[env_ids[:, None], task.finger_ids] = task.nominal_friction[task.finger_ids] * friction
 
 
-@requires_model_fields("body_pos", "body_quat", recompute=RecomputeLevel.set_const_0)
-def reset_scene(env, env_ids):
-    task, data, model = env.hammer, env.sim.data, env.sim.model
+def public_observation(seed_pos, seed_quat, widths, open_ctrl, *, finger_pos, finger_vel,
+                       camera_pos, camera_quat, intrinsics, target_pos, target_quat):
+    """仿真缓存和在线公开输入共用的 50 维字段；仅计算张量。"""
+    approach = torch.zeros_like(seed_pos)
+    approach[:, 2] = 0.10
+    pregrasp = seed_pos - quat_apply(seed_quat, approach)
+    return torch.cat((seed_pos, seed_quat, widths[:, None], open_ctrl[:, None],
+        pregrasp, seed_quat, finger_pos, finger_vel, camera_pos, camera_quat, intrinsics,
+        target_pos, target_quat), dim=-1)
+
+
+def candidate_observations(env, env_ids, candidate):
+    """env_ids 可重复，用同一决策前场景批量计算不同候选，不绑定状态。"""
+    task, model = env.hammer, env.sim.model
     bank, count = task.bank, len(env_ids)
-    if task.selection is None:
-        scene = torch.multinomial(task.sampling_weights, count, replacement=True)
-        start = bank["offsets"][scene]
-        candidate = start + (torch.rand(count, device=env.device) *
-                            (bank["offsets"][scene + 1] - start)).long()
-    else:
-        scene, candidate = task.selection
-        scene, candidate = scene[env_ids], candidate[env_ids]
-    task.scene_id[env_ids], task.candidate_id[env_ids] = scene, candidate
-    model.body_pos[env_ids, task.hammer_id] = bank["reference_pos"][scene]
-    model.body_quat[env_ids, task.hammer_id] = bank["reference_quat"][scene]
-    for name in STATE_FIELDS:
-        getattr(data, name)[env_ids] = bank[name][scene]
-    data.time[env_ids] = 0
+    scene = task.scene_id[env_ids]
     # 使用同条缓存的实际世界初态，避免在 forward 之前读取旧 xpos。
     object_pos, object_quat = bank["hammer_pos"][scene], bank["hammer_quat"][scene]
     seed_pos = object_pos + quat_apply(object_quat, bank["local_pos"][candidate])
     seed_quat = quat_mul(object_quat, bank["local_quat"][candidate])
-    task.seed_pos[env_ids], task.seed_quat[env_ids] = seed_pos, seed_quat
-    task.open_ctrl[env_ids] = bank["open_ctrl"][candidate]
-    # R_mount = R_grasp Ry(pi/2)，所以接近轴为 mount 的 +Z。
-    approach = torch.zeros_like(seed_pos)
-    approach[:, 2] = 0.10
-    pregrasp = seed_pos - quat_apply(seed_quat, approach)
-    data.mocap_pos[env_ids, task.mocap_id] = pregrasp
-    data.mocap_quat[env_ids, task.mocap_id] = seed_quat
-    qadr, vadr = task.base_qadr, task.base_vadr
-    data.qpos[env_ids, qadr:qadr + 3] = pregrasp
-    data.qpos[env_ids, qadr + 3:qadr + 7] = seed_quat
-    data.qvel[env_ids, vadr:vadr + 6] = 0
-    # 保留原开爪手指构型；候选开度由固定预抓段调整。
-    depth = bank["depth"][scene]
-    task.depth[env_ids] = task.noise(depth) if env.cfg.visual_noise else depth
-    public = torch.cat((seed_pos, seed_quat, bank["widths"][candidate, None],
-        task.open_ctrl[env_ids, None], pregrasp, seed_quat,
-        data.qpos[env_ids[:, None], task.finger_qadr],
-        data.qvel[env_ids[:, None], task.finger_vadr],
-        bank["camera_pos"][scene], bank["camera_quat"][scene], bank["intrinsics"][scene],
-        bank["target_pos"][scene], bank["target_quat"][scene]), dim=-1)
+    public = public_observation(seed_pos, seed_quat, bank["widths"][candidate],
+        bank["open_ctrl"][candidate],
+        finger_pos=bank["qpos"][scene[:, None], task.finger_qadr],
+        finger_vel=bank["qvel"][scene[:, None], task.finger_vadr],
+        **{key: bank[key][scene] for key in
+           ("camera_pos", "camera_quat", "intrinsics", "target_pos", "target_quat")})
     # 所有量冻结于决策前；结果快照绝不进入 actor/critic。
     head_offset = torch.zeros_like(object_pos)
     head_offset[:, 0] = -0.24
@@ -119,4 +103,51 @@ def reset_scene(env, env_ids):
         object_pos + quat_apply(object_quat, head_offset),
         bank["support_pos"][scene], bank["support_quat"][scene], support_size,
         mass[:, None], inertia, friction), dim=-1)
-    task.public[env_ids], task.privileged[env_ids] = public, privileged
+    return TensorDict({"public_seed": public, "privileged": privileged,
+                       "depth": task.depth[env_ids]}, batch_size=[count])
+
+
+def bind_candidates(env, env_ids, candidate):
+    """绑定决策前候选及完整夹爪初态；不重置场景、深度或随机化参数。"""
+    task, data = env.hammer, env.sim.data
+    obs = candidate_observations(env, env_ids, candidate)
+    public = obs["public_seed"]
+    seed_pos, seed_quat, pregrasp = public[:, :3], public[:, 3:7], public[:, 9:12]
+    task.candidate_id[env_ids] = candidate
+    task.seed_pos[env_ids], task.seed_quat[env_ids] = seed_pos, seed_quat
+    task.open_ctrl[env_ids] = public[:, 8]
+    task.public[env_ids], task.privileged[env_ids] = public, obs["privileged"]
+    data.mocap_pos[env_ids, task.mocap_id] = pregrasp
+    data.mocap_quat[env_ids, task.mocap_id] = seed_quat
+    qadr, vadr = task.base_qadr, task.base_vadr
+    data.qpos[env_ids, qadr:qadr + 3] = pregrasp
+    data.qpos[env_ids, qadr + 3:qadr + 7] = seed_quat
+    data.qvel[env_ids, vadr:vadr + 6] = 0
+    # 保留缓存的开爪手指构型；候选开度由固定预抓段调整。
+    scene = task.scene_id[env_ids]
+    data.qpos[env_ids[:, None], task.finger_qadr] = task.bank["qpos"][scene[:, None], task.finger_qadr]
+    data.qvel[env_ids[:, None], task.finger_vadr] = task.bank["qvel"][scene[:, None], task.finger_vadr]
+    return obs
+
+
+@requires_model_fields("body_pos", "body_quat", recompute=RecomputeLevel.set_const_0)
+def reset_scene(env, env_ids):
+    task, data, model = env.hammer, env.sim.data, env.sim.model
+    bank, count = task.bank, len(env_ids)
+    if task.selection is None:
+        scene = torch.multinomial(task.sampling_weights, count, replacement=True)
+        start = bank["offsets"][scene]
+        candidate = start + (torch.rand(count, device=env.device) *
+                            (bank["offsets"][scene + 1] - start)).long()
+    else:
+        scene, candidate = task.selection
+        scene, candidate = scene[env_ids], candidate[env_ids]
+    task.scene_id[env_ids] = scene
+    model.body_pos[env_ids, task.hammer_id] = bank["reference_pos"][scene]
+    model.body_quat[env_ids, task.hammer_id] = bank["reference_quat"][scene]
+    for name in STATE_FIELDS:
+        getattr(data, name)[env_ids] = bank[name][scene]
+    data.time[env_ids] = 0
+    depth = bank["depth"][scene]
+    task.depth[env_ids] = task.noise(depth) if env.cfg.visual_noise else depth
+    bind_candidates(env, env_ids, candidate)

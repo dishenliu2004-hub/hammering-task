@@ -1,4 +1,4 @@
-"""指定训练权重，评估 SDK 基线和训练策略并导出四类放置的两份 CSV。"""
+"""按场景对比 AnyGrasp 与训练权重的敲击成功率和最大敲击力。"""
 
 import argparse
 import csv
@@ -9,11 +9,9 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from hammer_rl.env_cfg import make_env_cfg
-
 PLACEMENTS = ("flat", "lean_head_down", "lean_head_up", "inverted")
-METRICS = ("valid_strike", "peak_force")
+METRICS = (("valid_strike", 100.0, np.mean),
+           ("peak_force", 1.0, np.mean))
 
 
 def main():
@@ -23,72 +21,58 @@ def main():
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--num-envs", type=int, default=128)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--episodes", type=int, default=0, help="0 为全部评估场景；正值用于短运行")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--anygrasp-extra-depth", type=float, default=0.03,
+                        help="AnyGrasp 原始预测深度上的额外深入量（米），替换缓存中的 0.03 m")
     args = parser.parse_args()
     checkpoint = args.checkpoint.resolve()
     config = json.loads((checkpoint.parent / "run_config.json").read_text())
-    data_file = args.data_file or Path(__file__).resolve().parents[1] / "weight/hammer_rl/eval_bank_128.npz"
+    data_file = args.data_file or Path(__file__).resolve().parents[1] / "weight/hammer_rl/reset_bank_256.npz"
     output_dir = args.output_dir or checkpoint.parent / f"comparison_{checkpoint.stem}"
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluation = [
         sys.executable, "-m", "hammer_rl.evaluate",
         "--split", "eval", "--placement", "all",
-        "--episodes", "0", "--num-envs", str(args.num_envs),
+        "--episodes", str(args.episodes), "--num-envs", str(args.num_envs),
+        "--seed", str(args.seed),
         "--device", args.device, "--headless",
     ]
-    for policy in ("zero", "trained"):
+    for name, policy, selection in (("zero", "zero", "sdk"),
+                                    ("trained", "trained", "learned")):
         command = [*evaluation, "--data-file", str(data_file),
-            "--policy", policy, "--output", str(output_dir / f"{policy}.npz")]
+            "--policy", policy, "--selection", selection,
+            "--output", str(output_dir / f"{name}.npz")]
         if policy == "zero":
             command.extend(("--hammer-head-extra-mass", str(config["hammer_head_extra_mass"])))
+            command.extend(("--grasp-depth-offset", str(args.anygrasp_extra_depth - 0.03)))
         else:
             command.extend(("--checkpoint", str(checkpoint)))
-        subprocess.run(command, check=True)
-    with np.load(output_dir / "zero.npz") as source:
-        zero = dict(source)
-    with np.load(output_dir / "trained.npz") as source:
-        trained = dict(source)
-    if zero.keys() != trained.keys():
-        raise ValueError("Metric names differ")
-    for key in ("scene_id", "candidate_id"):
-        np.testing.assert_array_equal(zero[key], trained[key])
-    pairs = np.column_stack((zero["scene_id"], zero["candidate_id"]))
-    if len(np.unique(pairs, axis=0)) != len(pairs):
-        raise ValueError("Duplicate scene/candidate pairs")
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+    results = {}
+    for name in ("zero", "trained"):
+        with np.load(output_dir / f"{name}.npz") as source:
+            results[name] = dict(source)
+        (output_dir / f"{name}.npz").unlink()
+    zero = results["zero"]
     with np.load(data_file) as bank:
         placements = bank["placement"][zero["scene_id"]]
     selections = {name: placements == i for i, name in enumerate(PLACEMENTS)}
-    reward_terms = make_env_cfg(data_file=str(data_file), training=False).rewards
-    rewards_path = output_dir / "trained_rewards.csv"
     comparison_path = output_dir / "metrics_comparison.csv"
-    with (
-        rewards_path.open("w", newline="", encoding="utf-8") as rewards_output,
-        comparison_path.open("w", newline="", encoding="utf-8") as comparison_output,
-    ):
-        rewards_writer = csv.writer(rewards_output)
+    with comparison_path.open("w", newline="", encoding="utf-8") as comparison_output:
         comparison_writer = csv.writer(comparison_output)
-        rewards_writer.writerow((
-            "placement", "scenes", "episodes",
-            *(f"reward_{name}" for name in reward_terms), "total_reward",
-        ))
         comparison_writer.writerow((
-            "placement", "scenes", "episodes",
+            "placement",
             "anygrasp_valid_strike_percent", "trained_valid_strike_percent", "delta_valid_strike_pp",
             "anygrasp_peak_force_N", "trained_peak_force_N", "delta_peak_force_N",
         ))
         for placement, mask in selections.items():
-            counts = (placement, len(np.unique(zero["scene_id"][mask])), int(mask.sum()))
-            # 与训练日志一致：原始评分乘环境配置的奖励权重。
-            rewards_writer.writerow((
-                *counts,
-                *(trained[name][mask].mean() * term.weight for name, term in reward_terms.items()),
-                trained["reward"][mask].mean(),
-            ))
-            comparison_row = list(counts)
-            for name, scale in zip(METRICS, (100.0, 1.0)):
-                a, b = zero[name][mask].mean() * scale, trained[name][mask].mean() * scale
+            comparison_row = [placement]
+            for name, scale, aggregate in METRICS:
+                a, b = (aggregate(results[method][name][mask]) * scale
+                        for method in ("zero", "trained"))
                 comparison_row.extend((a, b, b - a))
             comparison_writer.writerow(comparison_row)
-    print(rewards_path)
     print(comparison_path)
 
 

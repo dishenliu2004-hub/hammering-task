@@ -59,6 +59,20 @@ class GraspResidualActionCfg(ActionTermCfg):
         return GraspResidualAction(self, env)
 
 
+def refine_pose(seed_pos, seed_quat, actions, cfg):
+    """训练动作项和候选推理共用的局部残差合成。"""
+    delta = torch.tanh(actions)
+    identity = torch.zeros_like(seed_quat)
+    identity[:, 0] = 1
+    final_pos = seed_pos + quat_apply(seed_quat, delta[:, :3] * cfg.position_scale)
+    local_rotation = quat_box_plus(identity, delta[:, 3:] * cfg.rotation_scale)
+    final_quat = quat_mul(seed_quat, local_rotation)
+    approach = torch.zeros_like(seed_pos)
+    approach[:, 2] = 1
+    pregrasp = final_pos - 0.10 * quat_apply(final_quat, approach)
+    return final_pos, final_quat, pregrasp
+
+
 class GraspResidualAction(ActionTerm):
     def __init__(self, cfg, env):
         # 整场景 spec_fn，无虚构 Entity 或机械臂。
@@ -141,11 +155,8 @@ class GraspResidualAction(ActionTerm):
     def process_actions(self, actions):
         self._raw_action.copy_(actions)
         self._substep = 0
-        delta = torch.tanh(actions)
-        self.final_pos = self.task.seed_pos + quat_apply(self.task.seed_quat, delta[:, :3] * self.cfg.position_scale)
-        local_rotation = quat_box_plus(self.identity, delta[:, 3:] * self.cfg.rotation_scale)
-        self.final_quat = quat_mul(self.task.seed_quat, local_rotation)
-        self.pregrasp = self.final_pos - 0.10 * quat_apply(self.final_quat, self.unit[:, 2])
+        self.final_pos, self.final_quat, self.pregrasp = refine_pose(
+            self.task.seed_pos, self.task.seed_quat, actions, self.cfg)
         data = self._env.sim.data
         self.start_pos = data.mocap_pos[:, self.mocap].clone()
         self.start_quat = data.mocap_quat[:, self.mocap].clone()
