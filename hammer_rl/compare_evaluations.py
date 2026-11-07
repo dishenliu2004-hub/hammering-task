@@ -11,7 +11,7 @@ import numpy as np
 
 PLACEMENTS = ("flat", "lean_head_down", "lean_head_up", "inverted")
 METRICS = (("valid_strike", 100.0, np.mean),
-           ("peak_force", 1.0, np.mean))
+           ("mean_force", 1.0, np.mean))
 
 
 def main():
@@ -64,7 +64,7 @@ def main():
         comparison_writer.writerow((
             "placement",
             "anygrasp_valid_strike_percent", "trained_valid_strike_percent", "delta_valid_strike_pp",
-            "anygrasp_peak_force_N", "trained_peak_force_N", "delta_peak_force_N",
+            "anygrasp_mean_force_N", "trained_mean_force_N", "delta_mean_force_N",
         ))
         for placement, mask in selections.items():
             comparison_row = [placement]

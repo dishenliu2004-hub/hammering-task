@@ -130,12 +130,12 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                      "wrap", "orientation", "distance", "stability", "force", "task_success", "drop"),
                      (2, 3, 10, 5, 3, 2, 1, 20, 30, 100, -20))},
         terminations={"attempt_complete": TerminationTermCfg(func=terminations.attempt_complete)},
-        # 子步收集快照和力峰值，回合末记录最终指标。
+        # 子步收集快照和平均力，回合末记录最终指标。
         metrics={"collect": MetricsTermCfg(func=collect_attempt, per_substep=True),
                  **{name: MetricsTermCfg(func=rewards.score, params={"name": name}, reduce="last")
                     for name in ("capture", "lift_progress", "lift_success", "wrap", "orientation", "distance", "stability", "force",
                         "impact_impulse", "task_success", "drop",
-                        "translation_drift", "rotation_drift", "peak_force", "valid_strike",
+                        "translation_drift", "rotation_drift", "mean_force", "valid_strike",
                         "lift_height", "grasp_before_swing",
                         "seat_closure", "seat_lift", "seat_before_swing")}},
         # 仅教师训练启用摆放课程。

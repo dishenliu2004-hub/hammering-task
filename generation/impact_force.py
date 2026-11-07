@@ -9,6 +9,9 @@ class PeakImpactForce:
         self.address = int(model.sensor("cylinder_endface_normal_force").adr[0])
         self.swing_peak = 0.0
         self.return_peak = 0.0
+        self.window_steps = round(0.04 / model.opt.timestep)
+        self.force_sum = 0.0
+        self.force_frames = 0
         self.phase = "swing"
         self.impact_started = False
         self.impact_finished = False
@@ -32,6 +35,10 @@ class PeakImpactForce:
     def peak(self):
         return max(self.swing_peak, self.return_peak)
 
+    @property
+    def mean_force(self):
+        return self.force_sum / self.window_steps
+
     def __call__(self):
         data = self.simulation.data
         force = data.sensordata[0, self.address].item()
@@ -49,4 +56,7 @@ class PeakImpactForce:
             self.unloaded_steps = self.unloaded_steps + 1 if force == 0.0 else 0
             self.impact_finished = self.swing_complete and self.unloaded_steps >= 3 and not touching
             self.swing_peak = max(self.swing_peak, force)
+        if self.impact_started and self.force_frames < self.window_steps:
+            self.force_sum += force
+            self.force_frames += 1
         return self.peak

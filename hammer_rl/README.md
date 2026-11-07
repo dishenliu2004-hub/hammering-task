@@ -211,9 +211,8 @@ actor 更新后，应重新校准。蒸馏 checkpoint 包含学生、教师和�
 ```bash
 cd /home/ubuntu20/CodeMujoco/hammering-task
 conda activate hammer
-tensorboard --logdir weight/hammer_rl/runs/teacher/formal_02 --port 6006
+tensorboard --logdir weight/hammer_rl/runs/teacher/finish_01 --port 6006
 ```
-
 本机浏览器打开 <http://localhost:6006>。
 
 在 Scalars 界面选择 `Train/total_reward`，横轴使用 `Step`，将 Smoothing 设为 `0`，
@@ -258,7 +257,7 @@ cd /home/ubuntu20/CodeMujoco/hammering-task
 
 python -m visualization.compare_hammering \
   --checkpoint weight/hammer_rl/runs/teacher/finish_01/model_best.pt \
-  --placement flat \
+  --placement inverted \
   --split eval \
   --device cuda:0
 ```
@@ -272,12 +271,6 @@ python -m visualization.compare_hammering \
 | `lean_head_up` | 斜靠，锤头朝上 |
 | `inverted` | 倒立 |
 
-程序每轮从缓存的指定放置类型和 `--split` 划分中随机抽取三个场景，允许重复，复用缓存候选。
-默认读取 checkpoint 旁配置中的数据路径，`--data-file` 可指定其他缓存；
-当前准备脚本生成的候选已沿接近方向额外深入 30 mm，回放时不再生成候选或增加该偏移。
-上排由 critic 选择候选并由 actor 微调，下排使用同场景、同候选集合的 SDK 最高分零残差，逐列配对。
-场景标签 `T1/T2/T3` 和 `A1/A2/A3` 分别对应训练组和基线组。
-窗口同时显示六个环境的场景编号、敲击峰值力（N）和加权总奖励；执行中数值随阶段更新，
 完成后暂停并保留最终画面与数值，按 **回车** 从缓存重新抽样再比较。
 
 ## 9. 四类放置的命中率与峰值力对比 CSV
@@ -288,6 +281,7 @@ python -m visualization.compare_hammering \
 python -m hammer_rl.compare_evaluations \
   --checkpoint weight/hammer_rl/runs/teacher/finish_01/model_best.pt \
   --data-file weight/hammer_rl/eval_bank_128.npz \
+  --output-dir weight/hammer_rl/runs/teacher/finish_01/comparison_01 \
   --anygrasp-extra-depth 0.03
 ```
 

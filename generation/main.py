@@ -98,9 +98,7 @@ def main():
                 gripper_action=1.0, dt=DT, viewer=viewer, on_step=process_events,
                 simulation=simulation, on_swing_step=swing_trajectory,
             )
-            print(f"挥击法向接触力峰值（含撞击及卸载）：{impact_force.swing_peak:.6f} N")
-            print(f"撤离法向接触力峰值：{impact_force.return_peak:.6f} N")
-            print(f"圆柱上表面撞击峰值：{impact_force.peak:.6f} N")
+            print(f"首次接触后40ms平均法向敲击力：{impact_force.mean_force:.6f} N")
             print(f"挥击开始时夹爪抓取中心到锤头中心距离：{impact_force.distance:.6f} m")
             # 动作完成后继续保留初始画面，直到关闭 MuJoCo 窗口。
             while viewer.is_running():

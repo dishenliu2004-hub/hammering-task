@@ -118,7 +118,7 @@ class GraspResidualAction(ActionTerm):
         self.values = {name: torch.zeros(env.num_envs, device=self.device) for name in (
             "capture", "lift_progress", "lift_success", "wrap", "orientation", "distance", "stability", "force",
             "impact_impulse", "task_success", "drop",
-            "translation_drift", "rotation_drift", "peak_force",
+            "translation_drift", "rotation_drift", "mean_force",
             "valid_strike", "lift_height", "grasp_before_swing",
             "seat_closure", "seat_lift", "seat_before_swing")}
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
@@ -404,19 +404,19 @@ class GraspResidualAction(ActionTerm):
             hit = evaluating & holding & touching & (force > 0)
             self.first_hit_step.copy_(torch.where(hit & (self.first_hit_step == 0), k, self.first_hit_step))
             values["valid_strike"].copy_(torch.maximum(values["valid_strike"], hit.float()))
-            values["peak_force"].copy_(torch.maximum(values["peak_force"], torch.where(hit, force, 0)))
             window_steps = round(self._env.cfg.impact_window_s / self._env.physics_dt)
             in_window = ((self.first_hit_step > 0) & (k - self.first_hit_step >= 0)
                          & (k - self.first_hit_step < window_steps))
             values["impact_impulse"].add_(torch.where(evaluating & holding & in_window, force * self._env.physics_dt, 0))
-            values["force"].copy_(torch.where(evaluating, values["peak_force"] / 10, values["force"]))
+            values["mean_force"].copy_(values["impact_impulse"] / (window_steps * self._env.physics_dt))
+            values["force"].copy_(torch.where(evaluating, values["mean_force"] / 10, values["force"]))
             values["task_success"].copy_(torch.where(evaluating, holding & (values["valid_strike"] > 0), values["task_success"]))
         if self.on_physics_step is not None:
             # 评估/回放时安装的逐子步回调，可用于显示或捕获最终指标。
             self.on_physics_step(self)
-        # 返回值供 collect metric 记录；框架会对子步返回值求平均，该日志不等于最终力峰值。
+        # 返回值供 collect metric 记录；框架会对子步返回值求平均，该日志不等于最终窗口平均力。
         # 奖励实际由 rewards.score() 读取 values 中各自的缓存，与这里的返回值分开。
-        return values["peak_force"]
+        return values["mean_force"]
 
 
 def collect_attempt(env):

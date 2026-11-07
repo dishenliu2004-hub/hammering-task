@@ -67,7 +67,7 @@ class PlacementCurriculum:
             values = env.action_manager.get_term("grasp").values
             samples = torch.stack(
                 [values[name][completed_ids] for name in
-                 ("task_success", "peak_force", "impact_impulse")], dim=-1
+                 ("task_success", "mean_force", "impact_impulse")], dim=-1
             ).float()
             for k in range(4):
                 self.history[k] = torch.cat(
