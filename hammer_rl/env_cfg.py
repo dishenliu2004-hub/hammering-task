@@ -41,7 +41,7 @@ class HammerEnvCfg(ManagerBasedRlEnvCfg):
     stability_position_scale: float = 0.015  # 相对平移尺度，m
     stability_rotation_scale: float = math.pi / 36  # 相对旋转尺度，5°
     impact_window_s: float = 0.04  # 首次有效命中后的冲量积分窗口，s
-    impulse_scale: float = 1.0  # 法向冲量归一化尺度，N·s
+    impulse_scale: float = 1.0  # 保留原法向冲量尺度，N·s；逐场景 SGS 不使用
 
 
 def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
@@ -128,7 +128,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         rewards={name: RewardTermCfg(func=rewards.score, weight=weight, params={"name": name})
                  for name, weight in zip(("capture", "lift_progress", "lift_success", "grasp_before_swing",
                      "wrap", "orientation", "distance", "stability", "force", "task_success", "drop"),
-                     (2, 3, 10, 5, 3, 2, 1, 20, 30, 100, -20))},
+                     (2, 3, 10, 5, 3, 2, 5, 30, 30, 100, -30))},
         terminations={"attempt_complete": TerminationTermCfg(func=terminations.attempt_complete)},
         # 子步收集快照和平均力，回合末记录最终指标。
         metrics={"collect": MetricsTermCfg(func=collect_attempt, per_substep=True),
@@ -138,8 +138,8 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                         "translation_drift", "rotation_drift", "mean_force", "valid_strike",
                         "lift_height", "grasp_before_swing",
                         "seat_closure", "seat_lift", "seat_before_swing")}},
-        # 仅教师训练启用摆放课程。
-        curriculum={"placement": CurriculumTermCfg(func=curriculum.PlacementCurriculum,
+        # 仅教师训练启用逐场景 SGS。
+        curriculum={"scene_sgs": CurriculumTermCfg(func=curriculum.SceneSgsCurriculum,
                                                    params=curriculum.SGS_PARAMS.copy())}
                    if stage == "teacher" and training else {},
     )

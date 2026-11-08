@@ -22,8 +22,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank.npz")
     parser.add_argument("--split", choices=("train", "eval"), default="eval")
-    parser.add_argument("--placement", choices=("all", "flat", "lean_head_down", "lean_head_up", "inverted"),
-                        default="all", help="只评估指定初始摆放")
     parser.add_argument("--policy", choices=("zero", "trained"), default="zero")
     parser.add_argument("--selection", choices=("all", "sdk", "learned"), default="all")
     parser.add_argument("--checkpoint", type=Path)
@@ -45,9 +43,6 @@ def main():
         parser.error("trained 策略需要 --checkpoint")
     with np.load(args.data_file) as source:
         mask = source["split"] == (args.split == "eval")
-        if args.placement != "all":
-            placement = ("flat", "lean_head_down", "lean_head_up", "inverted").index(args.placement)
-            mask &= source["placement"] == placement
         pairs = [(int(s), c) for s in np.flatnonzero(mask)
                  for c in range(int(source["offsets"][s]), int(source["offsets"][s + 1]))]
         candidate_count = len(pairs)
@@ -56,7 +51,7 @@ def main():
                 source["offsets"][s]:source["offsets"][s + 1]].argmax()))
                 for s in np.flatnonzero(mask)]
     if not pairs:
-        parser.error("指定划分和摆放下没有抓取候选")
+        parser.error("指定划分下没有抓取候选")
     if args.episodes == 0:
         args.episodes = len(pairs)
     stage = "teacher"
@@ -83,7 +78,7 @@ def main():
             policy, critic = load_models(args.checkpoint, args.device,
                                          with_critic=args.selection == "learned")
         env.seed(args.seed)
-        print(f"Evaluation: policy={args.policy}, selection={args.selection}, placement={args.placement}, "
+        print(f"Evaluation: policy={args.policy}, selection={args.selection}, "
               f"scenes={len(set(s for s, _ in pairs))}, candidates={candidate_count}, "
               f"episodes={args.episodes}", flush=True)
         rows = []

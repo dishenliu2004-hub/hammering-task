@@ -19,7 +19,7 @@ def main():
     events = EventAccumulator(str(args.log_dir), size_guidance={"scalars": 0},
                               purge_orphaned_data=False).Reload()
     strikes = {event.step: event.value for event in events.Scalars("Episode_Metrics/valid_strike")}
-    forces = {event.step: event.value for event in events.Scalars("Episode_Metrics/peak_force")}
+    forces = {event.step: event.value for event in events.Scalars("Episode_Metrics/mean_force")}
     steps = sorted(strikes)
     hits = [round(strikes[step] * args.num_envs) for step in steps]
     # peak_force 已包含未命中时的零值，除以命中比例得到仅有效命中的均值。

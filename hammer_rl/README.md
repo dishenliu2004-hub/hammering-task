@@ -34,76 +34,61 @@ python -m hammer_rl.prepare \
   --workers 4
 ```
 
+锤子位姿在 L 型支架局部坐标系连续采样：`x∈[0.12,0.42] m`、
+`y∈[-0.10,0.10] m`，yaw、roll 覆盖 `[-π,π]`，tilt 覆盖 `[-π/2,π/2]`。
+旋转按 `Rz(yaw) @ Ry(-tilt) @ Rx(roll)` 组合，初始高度由现有碰撞几何投影确定，
+与底板或挡板留 1 mm 间隙；不限制锤体全部位于底板投影内。
+每个候选先沉降 2 s，再观察 0.5 s；仅接受窗口首末位移小于 5 mm、
+最短旋转角变化小于 3°，且末态仍与支架底板或挡板接触的结果，否则重新采样。
+这些阈值是算法初值，尚未通过本次任务的实验验证。
+
+缓存保存观察窗口结束后的状态、`(1,120,160)` 深度和原有 AnyGrasp 候选及 `offsets`，
+不再保存 `placement`、`difficulty`。全部场景由 `--seed` 可复现地置乱，
+约 20% 标记为 eval，其余为 train；训练 reset 只抽取离线缓存。
+
 ## 3. 教师 PPO 训练
 
-教师 actor 和 critic 使用特权观测。平放（`flat`）、锤头朝下斜靠（`lean_head_down`）、
-锤头朝上斜靠（`lean_head_up`）和倒立（`inverted`）从首次 reset 起同时开放。
-仅教师训练启用动态分配 SGS，仅使用训练样本统计。每类保留最近 512 个已完成尝试，
-每条保存 `task_success`、`peak_force`（N）、`impact_impulse`（N·s）。
+教师 actor 和 critic 使用特权观测。所有连续稳定位姿的训练场景从首次 reset 起开放。
+仅教师训练启用逐场景 SGS，以缓存行号 `scene_id` 为唯一统计键，
+每个训练场景保留最近 100 个已完成尝试的二值 `task_success`。
 `task_success` 表示抓取、保持、有效命中且卸载结束前仍持有的完整任务成功，
-课程不使用总奖励或单独的抬升成功率；`force` 奖励为 `peak_force / 10`，
-权重为 30，即每 1 N 有效峰值力贡献 3 分；冲量用于指标和课程力度统计。
-空历史的成功率为 0.5，初始概率四类均为 0.25。
+课程仅使用该成功历史；原有力奖励和冲量指标保持不变。
+场景无历史时成功率先验为 0.5，首次更新前均匀采样全部训练场景。
 
-课程参数保存在 `run_config.json` 的 `placement_sgs`，由现有课程项的 `params` 使用：
+课程参数保存在 `run_config.json` 的 `scene_sgs`，由现有课程项的 `params` 使用：
 
 | 参数 | 值 |
 | --- | --- |
-| `history_size` | 512 |
-| `warmup_samples_per_class` | 256 |
+| `history_size` | 100 |
 | `update_interval` | 10 |
-| `target_success` | 0.9 |
-| `force_scale_n` | 100.0 |
-| `force_mix` | 0.7 |
-| `strength_weight` | 0.5 |
-| `priority_power` | 2.0 |
-| `min_probability` | 0.075 |
-| `max_probability` | 0.775 |
-| `probability_smoothing` | 0.3 |
-| `min_success_samples` | 32 |
+| `target_success` | 0.5 |
+| `concentration` | 1.0 |
+| `temperature` | 2.0 |
+| `epsilon` | 1e-4 |
 
-对每类历史计算成功率 `s`。只有完整成功样本至少 32 条时，才启用力度项，
-取成功回合峰值力中位数 `F` 和冲量中位数 `J`：
+每 10 个包含完成回合的批次更新一次概率，无额外热身。仅在训练场景间计算：
 
 ```text
-d_force = 100 / (F + 100)
-d_impulse = env.cfg.impulse_scale / (J + env.cfg.impulse_scale)
-d_strength = 0.7 * d_force + 0.3 * d_impulse
-d_success = clamp((0.9 - s) / 0.9, 0, 1)
-priority = d_success + 0.5 * (1 - d_success) * d_strength
-score = priority ** 2
+p_i = mean(last_100_task_success_i)  # 无历史为 0.5
+w_i = (p_i + eps) ** (kappa * t) * (1 - p_i + eps) ** (kappa * (1 - t))
+logit_i = log(max(w_i, eps) + eps) / T
+q_train = softmax(logit)
+q_eval = 0
 ```
 
-成功不足 32 条时 `d_strength=0`，仅表示暂不启用力度项。失败回合即使保留正峰值力，
-也不参与成功力度统计。100 N 是未经当前训练结果调优的峰值力归一化初值，
-不是成功阈值或已标定的目标力；冲量尺度直接复用 `env.cfg.impulse_scale`（当前 1 N·s）。
+其中 `t=0.5`、`kappa=1.0`、`T=2.0`、`eps=1e-4`。
+成功率接近 0.5 的场景优先级较高，接近 0 或 1 的场景优先级较低。
+`q_i` 是场景采样概率，不是成功率；每次 reset 直接使用对应的场景权重，
+场景内候选继续均匀采样。评估场景不累计历史，采样权重为零。
+同一场景的并行完成回合全部计入历史，初始化和恢复后的零长度 reset 不计入。
+日志仅输出 `sgs_mean_success`、`sgs_mean_probability`、`sgs_min_probability`、
+`sgs_max_probability`、`sgs_observed_scenes`，不逐场景生成日志键。
 
-四类历史都达到 256 条前保持均分；此后每 10 个含完成尝试的批次更新一次概率。
-随机采样不保证固定批数完成热身。更新公式为：
-
-```text
-score.sum() == 0 时：target = [0.25, 0.25, 0.25, 0.25]
-否则：
-    raw = 0.075 + 0.70 * score / score.sum()
-    excess = clamp_min(raw - 0.775, 0)
-    receivers = (raw <= 0.775)
-    target = raw - excess + excess.sum() * receivers / receivers.sum()
-q_next = 0.7 * q + 0.3 * target
-```
-
-零成功类别优先级为 1；成功率达到 90% 后仍可因力度不足获得额外份额。
-固定保底份额合计 30%（每类 7.5%），剩余 70% 按 score 动态分配。
-7.5%～77.5% 是四类目标采样概率边界，实际概率经平滑逐步接近目标，不是每批整数名额；
-256 个环境时，每类保底对应的期望数量为 19.2 次，实际数量会波动。
-类内场景仍均匀采样，场景内候选也仍均匀采样。
-每个训练场景权重为 `q[placement] / 该类训练场景数`，评估场景权重为零。
-日志保留 `success_rate_*`、`probability_*`，增加 `strength_deficit_*`、`success_samples_*`。
-调整训练资源分配不等于已经证明四类成功率或敲击力度提升。
-
-新 teacher run 使用当前参数、空历史和均分热身；新策略 checkpoint 普通 `--resume`
-恢复保存的参数、历史、概率和完成批次计数。旧 SGS checkpoint 切换须显式添加
-`--reset-placement-sgs`，保留模型、优化器和迭代，仅采用当前课程配置并重新均分热身，
-不自动迁移旧课程状态。具体续训方法见第 7 节。
+新 teacher run 使用当前参数、空历史和均匀初始概率；新 SGS checkpoint 普通 `--resume`
+恢复保存的参数、逐场景历史、概率和完成批次计数。旧 SGS 状态不兼容新结构，
+切换时须显式添加 `--reset-scene-sgs` 并通过 `--data-file` 指定新的连续场景缓存，
+保留模型、优化器和迭代，清空课程状态并采用当前 SGS 参数，不自动迁移旧课程状态。
+具体续训方法见第 7 节。
 
 ```bash
 python -m hammer_rl.train \
@@ -243,9 +228,11 @@ python -m hammer_rl.train \
 - 续训会在原权重目录写入结果，并从该目录的 `run_config.json` 恢复阶段、
   数据路径、锤头额外质量、教师 SGS 参数和算法配置。保留权重旁的配置文件；
   同时传入 `--log-dir` 也不会改变续训输出目录。
-- 新策略教师周期和最终 checkpoint 均通过 `infos["placement_sgs"]` 保存 `history`、
+- 新策略教师周期和最终 checkpoint 均通过 `infos["scene_sgs"]` 保存 `history`、
   `probabilities`、`completed_batches`；普通续训恢复全部课程状态。初始化或恢复后的
-  零长度 reset 不追加历史、不增加计数、不平滑概率，但仍把当前概率应用到场景权重。
+  零长度 reset 不追加历史、不增加计数、不更新概率，但仍把当前概率应用到场景权重。
+- 显式使用 `--reset-scene-sgs --data-file 新缓存路径` 时，采用本次命令的数据路径并写回
+  `run_config.json`，重置逐场景课程状态；不加此开关时继续恢复原运行的数据路径。
 - `--num-envs`、`--device`、`--seed` 仍取本次命令参数，建议与原训练保持一致。
 - `--teacher-checkpoint` 用于首次启动蒸馏，`--init-from` 用于首次启动学生 PPO；
   同阶段恢复时使用 `--resume`。
@@ -257,23 +244,16 @@ cd /home/ubuntu20/CodeMujoco/hammering-task
 
 python -m visualization.compare_hammering \
   --checkpoint weight/hammer_rl/runs/teacher/finish_01/model_best.pt \
-  --placement inverted \
   --split eval \
   --device cuda:0
 ```
 
-`--checkpoint` 和 `--placement` 必填；四种放置参数如下：
-
-| 参数值 | 放置类型 |
-| --- | --- |
-| `flat` | 平放 |
-| `lean_head_down` | 斜靠，锤头朝下 |
-| `lean_head_up` | 斜靠，锤头朝上 |
-| `inverted` | 倒立 |
+`--checkpoint` 必填；从指定 `--split` 随机抽取三个连续场景，
+以六环境成对展示学习选择＋残差与 AnyGrasp 零残差。
 
 完成后暂停并保留最终画面与数值，按 **回车** 从缓存重新抽样再比较。
 
-## 9. 四类放置的命中率与峰值力对比 CSV
+## 9. 全部评估场景的命中率与峰值力对比 CSV
 
 在项目根目录、已激活 `hammer` 环境后，只需指定要对比的权重：
 
@@ -286,14 +266,15 @@ python -m hammer_rl.compare_evaluations \
 ```
 
 分别运行 SDK 最高分＋零残差、critic 选择＋actor 残差两组，每组每场景执行一次。
-省略 `--data-file` 时使用 `reset_bank_256.npz` 留出的 52 个场景，每场景 32 个候选；
-上例指定的 `eval_bank_128.npz` 包含四类放置各 32 个测试场景，每场景 32 个候选。
+省略 `--data-file` 时使用连续生成的 `reset_bank_256.npz` 留出的约 20% 场景
+（256 场景时为 51 个），每场景最多 32 个候选；
+上例的自定义 `eval_bank_128.npz` 也需使用连续场景缓存，实际评估范围由其中 `split` 决定。
 候选经过 AnyGrasp NMS，再以最高分位姿为起点，按平移和旋转距离做最远点采样。
 可用 `--episodes 4 --num-envs 4` 做短运行，或 `--data-file` 指定其他多候选缓存。
 
 默认输出到 checkpoint 同目录的 `comparison_<checkpoint文件名去扩展名>/`，
-可用 `--output-dir` 指定目录。最终仅生成 `metrics_comparison.csv`，按四类放置保存两组的
-有效命中率（`valid_strike` 的均值，百分比）、平均有效峰值力（`peak_force` 的均值，N）
+可用 `--output-dir` 指定目录。最终仅生成 `metrics_comparison.csv`，以一个 `all` 行汇总两组的
+有效命中率（`valid_strike` 的均值，百分比）、平均有效峰值力（`mean_force` 的均值，N）
 以及训练策略减 SDK 基线的差值；命中率差值单位为百分点。峰值力均值包含未命中的零值。
 过程中的 `zero.npz` 和 `trained.npz` 在读取后删除，不生成 `selected.npz` 或 `trained_rewards.csv`。
 两组按同一场景顺序配对，候选编号允许不同；此对比同时包含候选选择和 actor 微调的效果，
@@ -357,5 +338,5 @@ result = select_grasp(actor, scorer, depth, scene, grasps)
 
 相关实现：[训练入口](train.py)、[数据准备](prepare.py)、[评分校准](calibrate.py)、
 [选择与微调](inference.py)、[评估入口](evaluate.py)、
-[网络和算法配置](rl_cfg.py)、[环境配置](env_cfg.py)、[四类对比](compare_evaluations.py)、
+[网络和算法配置](rl_cfg.py)、[环境配置](env_cfg.py)、[场景总体对比](compare_evaluations.py)、
 [六场景展示](../visualization/compare_hammering.py)。

@@ -23,9 +23,9 @@ class _TeacherSgsRunner(MjlabOnPolicyRunner):
     def save(self, path, infos=None):
         term = (
             self.env.unwrapped.curriculum_manager
-            .get_term_cfg("placement").func
+            .get_term_cfg("scene_sgs").func
         )
-        infos = {**(infos or {}), "placement_sgs": term.state_dict()}
+        infos = {**(infos or {}), "scene_sgs": term.state_dict()}
         super().save(path, infos=infos)
 
 
@@ -87,9 +87,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", type=Path)
     parser.add_argument(
-        "--reset-placement-sgs",
+        "--reset-scene-sgs",
         action="store_true",
-        help="teacher续训时使用当前课程配置并清空课程状态，保留模型和优化器",
+        help="teacher续训时使用本次数据路径和当前课程配置，清空课程状态并保留模型和优化器",
     )
     parser.add_argument("--init-from", type=Path, help="仅 student：蒸馏 checkpoint 初始化 actor")
     parser.add_argument("--teacher-checkpoint", type=Path)
@@ -100,10 +100,13 @@ def main():
         run_dir = args.resume.resolve().parent
         config = json.loads((run_dir / "run_config.json").read_text())
         args.stage = config["stage"]
-        args.data_file = config["data_file"]
         args.hammer_head_extra_mass = config["hammer_head_extra_mass"]
-        if args.stage == "teacher" and args.reset_placement_sgs:
-            config["placement_sgs"] = SGS_PARAMS.copy()
+        if args.stage == "teacher" and args.reset_scene_sgs:
+            # 显式重置课程时采用本次缓存路径，并清除旧课程配置键。
+            config.pop("placement_sgs", None)
+            config["scene_sgs"] = SGS_PARAMS.copy()
+            config["data_file"] = str(Path(args.data_file).resolve())
+        args.data_file = config["data_file"]
     else:
         stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
         run_dir = args.log_dir or Path("weight/hammer_rl/runs") / args.stage / stamp
@@ -111,14 +114,14 @@ def main():
             hammer_head_extra_mass=args.hammer_head_extra_mass,
             seed=args.seed)
         if args.stage == "teacher":
-            config["placement_sgs"] = SGS_PARAMS.copy()
+            config["scene_sgs"] = SGS_PARAMS.copy()
         config["rl"] = distill_cfg() if args.stage == "distill" else asdict(ppo_cfg(args.stage))
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     env_cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=args.stage,
         num_envs=args.num_envs, seed=args.seed)
     if args.stage == "teacher":
-        env_cfg.curriculum["placement"].params = config["placement_sgs"]
+        env_cfg.curriculum["scene_sgs"].params = config["scene_sgs"]
     env = _RewardLogVecEnvWrapper(ManagerBasedRlEnv(env_cfg, device=args.device))
     train_cfg = config["rl"]
     train_cfg["check_for_nan"] = False
@@ -132,9 +135,9 @@ def main():
         if args.resume:
             infos = runner.load(str(args.resume), map_location=args.device)
             runner.current_learning_iteration += 1
-            if args.stage == "teacher" and not args.reset_placement_sgs:
-                term = env.unwrapped.curriculum_manager.get_term_cfg("placement").func
-                term.load_state_dict(infos["placement_sgs"])
+            if args.stage == "teacher" and not args.reset_scene_sgs:
+                term = env.unwrapped.curriculum_manager.get_term_cfg("scene_sgs").func
+                term.load_state_dict(infos["scene_sgs"])
             if args.stage == "distill" and infos:
                 env.unwrapped.common_step_counter = infos["env_state"]["common_step_counter"]
             # wrapper 构造时已经 reset，恢复状态后重新采样初始回合。

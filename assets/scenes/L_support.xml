@@ -53,8 +53,11 @@
             rgba="0.20 0.55 0.85 1"
             contype="1"
             conaffinity="1"
-            condim="4"
-            friction="1.0 0.005 0.0001"/>
+            priority="1"
+            condim="6"
+            friction="2.0 0.5 0.01"
+            solref="0.006 1"
+            solimp="0.99 0.999 0.001"/>
 
       <!--
         水平底板：
@@ -69,8 +72,11 @@
             rgba="0.20 0.55 0.85 1"
             contype="1"
             conaffinity="1"
-            condim="4"
-            friction="1.0 0.005 0.0001"/>
+            priority="1"
+            condim="6"
+            friction="2.0 0.5 0.01"
+            solref="0.006 1"
+            solimp="0.99 0.999 0.001"/>
 
       <!-- 内角标记 -->
       <site name="L_support_inner_corner"

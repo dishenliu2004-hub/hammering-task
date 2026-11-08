@@ -14,15 +14,11 @@ from hammer_rl.env_cfg import make_env_cfg
 from hammer_rl.inference import load_models, select_candidates
 from visualization.parallel_hammering import ParallelHammeringViewer
 
-PLACEMENTS = ("flat", "lean_head_down", "lean_head_up", "inverted")
-
-
 class ComparisonHammeringViewer(ParallelHammeringViewer):
-    def __init__(self, env, actor, critic, spacing, placement, checkpoint):
+    def __init__(self, env, actor, critic, spacing, checkpoint):
         self.actor, self.critic = actor, critic
         self.action = torch.zeros((env.num_envs, 6), device=env.device)
         super().__init__(env, lambda observations: self.action, spacing)
-        self.placement = placement
         self.checkpoint = checkpoint
         self.offsets[3:, 1] = -spacing
         self.cfg.azimuth = 90.0
@@ -33,8 +29,7 @@ class ComparisonHammeringViewer(ParallelHammeringViewer):
 
     def _prepare_round(self):
         bank = self.env.unwrapped.hammer.bank
-        scenes = ((bank["placement"] == PLACEMENTS.index(self.placement))
-                  & (bank["split"] == (self.env.cfg.split == "eval"))).nonzero().flatten()
+        scenes = (bank["split"] == (self.env.cfg.split == "eval")).nonzero().flatten()
         scene = scenes[torch.randint(len(scenes), (3,), device=self.env.device)]
         sdk = torch.stack([start + bank["scores"][start:end].argmax()
                            for start, end in zip(bank["offsets"][scene], bank["offsets"][scene + 1])])
@@ -58,7 +53,7 @@ class ComparisonHammeringViewer(ParallelHammeringViewer):
     def _set_status_overlay(self, viewer):
         term = self.env.unwrapped.action_manager.get_term("grasp")
         reward = sum(term.values[name] * cfg.weight for name, cfg in self.env.cfg.rewards.items())
-        values = torch.stack((term.values["peak_force"], reward), dim=-1).cpu().tolist()
+        values = torch.stack((term.values["mean_force"], reward), dim=-1).cpu().tolist()
         names = [f"{'Trained' if i < 3 else 'AnyGrasp'} {i % 3 + 1}  "
                  for i in range(self.env.num_envs)]
         scene = self.env.unwrapped.hammer.scene_id.cpu().tolist()
@@ -68,7 +63,7 @@ class ComparisonHammeringViewer(ParallelHammeringViewer):
         phase = "Final" if term._substep == self.env.cfg.decimation else "Running"
         viewer.set_texts((mujoco.mjtFontScale.mjFONTSCALE_100.value,
             mujoco.mjtGridPos.mjGRID_TOPLEFT.value,
-            "\n".join([self.placement, "Environment", *names, "Enter: new grasps"]),
+            "\n".join(["Continuous scenes", "Environment", *names, "Enter: new grasps"]),
             "\n".join([self.checkpoint, "Scene Candidate | Peak force | Total reward", *numbers, phase])))
 
     def _add_env_selection_marker(self, viewer):
@@ -85,7 +80,6 @@ class ComparisonHammeringViewer(ParallelHammeringViewer):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--placement", choices=PLACEMENTS, required=True)
     parser.add_argument("--data-file", type=Path)
     parser.add_argument("--split", choices=("train", "eval"), default="eval")
     parser.add_argument("--device", default="cuda:0")
@@ -106,7 +100,7 @@ def main():
         wrapper = RslRlVecEnvWrapper(env)
         actor, critic = load_models(args.checkpoint, args.device)
         viewer = ComparisonHammeringViewer(wrapper, actor, critic, args.spacing,
-            args.placement, args.checkpoint.name)
+            args.checkpoint.name)
         with torch.inference_mode():
             viewer.run()
     finally:

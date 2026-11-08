@@ -1,4 +1,4 @@
-"""按场景对比 AnyGrasp 与训练权重的敲击成功率和最大敲击力。"""
+"""总体对比 AnyGrasp 与训练权重的敲击成功率和最大敲击力。"""
 
 import argparse
 import csv
@@ -9,7 +9,6 @@ import sys
 
 import numpy as np
 
-PLACEMENTS = ("flat", "lean_head_down", "lean_head_up", "inverted")
 METRICS = (("valid_strike", 100.0, np.mean),
            ("mean_force", 1.0, np.mean))
 
@@ -33,7 +32,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluation = [
         sys.executable, "-m", "hammer_rl.evaluate",
-        "--split", "eval", "--placement", "all",
+        "--split", "eval",
         "--episodes", str(args.episodes), "--num-envs", str(args.num_envs),
         "--seed", str(args.seed),
         "--device", args.device, "--headless",
@@ -54,25 +53,20 @@ def main():
         with np.load(output_dir / f"{name}.npz") as source:
             results[name] = dict(source)
         (output_dir / f"{name}.npz").unlink()
-    zero = results["zero"]
-    with np.load(data_file) as bank:
-        placements = bank["placement"][zero["scene_id"]]
-    selections = {name: placements == i for i, name in enumerate(PLACEMENTS)}
     comparison_path = output_dir / "metrics_comparison.csv"
     with comparison_path.open("w", newline="", encoding="utf-8") as comparison_output:
         comparison_writer = csv.writer(comparison_output)
         comparison_writer.writerow((
-            "placement",
+            "scenes",
             "anygrasp_valid_strike_percent", "trained_valid_strike_percent", "delta_valid_strike_pp",
             "anygrasp_mean_force_N", "trained_mean_force_N", "delta_mean_force_N",
         ))
-        for placement, mask in selections.items():
-            comparison_row = [placement]
-            for name, scale, aggregate in METRICS:
-                a, b = (aggregate(results[method][name][mask]) * scale
-                        for method in ("zero", "trained"))
-                comparison_row.extend((a, b, b - a))
-            comparison_writer.writerow(comparison_row)
+        comparison_row = ["all"]
+        for name, scale, aggregate in METRICS:
+            a, b = (aggregate(results[method][name]) * scale
+                    for method in ("zero", "trained"))
+            comparison_row.extend((a, b, b - a))
+        comparison_writer.writerow(comparison_row)
     print(comparison_path)
 
 

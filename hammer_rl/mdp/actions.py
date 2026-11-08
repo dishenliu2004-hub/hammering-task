@@ -342,7 +342,7 @@ class GraspResidualAction(ActionTerm):
             values["wrap"].copy_(torch.where(lift, 2 * self.closure_enclosure
                                  + 0.10 * values["seat_closure"] + 0.15 * values["seat_lift"], 0) / 1.5)
 
-            # 横向夹柄；平放样本另按最终抓姿的接近轴评价双向侧抓偏好。
+            # 横向夹柄；按初态柄轴接近水平的程度，连续加权双向侧抓偏好。
             axis = torch.nn.functional.normalize(data.site_xpos[:, self.wide] - data.site_xpos[:, self.narrow], dim=-1)
             handle_axis = quat_apply(data.xquat[:, self.hammer], self.unit[:, 0])
             transverse = (1 - (axis * handle_axis).sum(-1).square()).clamp(0, 1)
@@ -350,8 +350,10 @@ class GraspResidualAction(ActionTerm):
             side = torch.nn.functional.normalize(torch.cross(self.unit[:, 2], initial_axis, dim=-1), dim=-1)
             approach = quat_apply(self.final_quat, self.unit[:, 2])
             side_score = (approach * side).sum(-1).square().clamp(0, 1)
-            flat = self.task.bank["placement"][self.task.scene_id] == 0
-            values["orientation"].copy_(torch.where(flat, 0.4 * transverse + 0.6 * side_score, transverse) * lift)
+            # 初态倾角从 0° 到 30° 时，平躺权重从 1 衰减至 0。
+            flatness = (1.0 - initial_axis[:, 2].abs() / math.sin(math.pi / 6)).clamp(0.0, 1.0)
+            values["orientation"].copy_(((1.0 - 0.6 * flatness) * transverse
+                                         + 0.6 * flatness * side_score) * lift)
 
             # 沿柄轴投影评分。
             center = (data.site_xpos[:, self.wide] + data.site_xpos[:, self.narrow]) / 2
