@@ -106,7 +106,19 @@ def create_scene(rng, hammer_head_extra_mass=0.0):
 def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0):
     from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
 
-    model, data, simulation = create_scene(rng, hammer_head_extra_mass)
+    while True:
+        model, data, simulation = create_scene(rng, hammer_head_extra_mass)
+        camera = CameraRGBPointCloud(model)
+        camera.renderer.update_scene(data, camera=camera.camera)
+        camera.renderer.enable_segmentation_rendering()
+        segmentation = camera.renderer.render()[::4, ::4]
+        camera.renderer.disable_segmentation_rendering()
+        # 与相机点云同分辨率：仅接纳锤柄存在可见像素的场景。
+        if np.any((segmentation[..., 0] == model.geom("hammer_handle").id)
+                  & (segmentation[..., 1] == mujoco.mjtObj.mjOBJ_GEOM)):
+            break
+        camera.close()
+        del simulation
     geometry = build_enclosure_geometry(model, "cpu")
     sample = {name: getattr(data, name).copy() for name in STATE_FIELDS}
     sample.update(handle_size=model.geom("hammer_handle").size[:2].copy(),
@@ -119,7 +131,6 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0):
                   target_quat=data.body("cylinder_sensing_endcap").xquat.copy(),
                   support_pos=data.body("support_L_support").xpos.copy(),
                   support_quat=data.body("support_L_support").xquat.copy())
-    camera = CameraRGBPointCloud(model)
     try:
         frame = camera.capture(data)
         depth = camera.renderer.render()[::8, ::8].copy()
@@ -171,8 +182,11 @@ def _prepare_candidates(grasps, sample, candidates_per_scene):
 
 def _prepare_scene_task(index, seed, candidates_per_scene, hammer_head_extra_mass):
     rng = np.random.default_rng(np.random.SeedSequence([seed, index]))
-    return prepare_scene(rng, min(candidates_per_scene, 32),
-                         hammer_head_extra_mass)
+    try:
+        return prepare_scene(rng, min(candidates_per_scene, 32),
+                             hammer_head_extra_mass)
+    except Exception as error:
+        raise RuntimeError(f"准备场景失败：scene={index}, seed={seed}\n{error}") from error
 
 
 def main():

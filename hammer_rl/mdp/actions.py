@@ -11,7 +11,7 @@ from mjlab.utils.lab_api.math import (axis_angle_from_quat, quat_apply, quat_app
     quat_box_plus, quat_conjugate, quat_error_magnitude, quat_mul)
 
 from generation.enclosure import build_enclosure_geometry, compute_enclosure_score, compute_handle_seating
-from .resets import initialize_task
+from .resets import initialize_task, restore_strike_state
 
 DT = 0.02
 
@@ -122,6 +122,9 @@ class GraspResidualAction(ActionTerm):
             "valid_strike", "lift_height", "grasp_before_swing",
             "seat_closure", "seat_lift", "seat_before_swing")}
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
+        self.last_task_success = torch.zeros(env.num_envs, device=self.device)
+        self.relative_closure_pos = torch.zeros((env.num_envs, 3), device=self.device)
+        self.relative_closure_quat = self.identity.clone()
         self.dropped = torch.zeros_like(self.grasp_valid)
         self.lost_contact_steps = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.first_hit_step = torch.zeros_like(self.lost_contact_steps)
@@ -157,16 +160,47 @@ class GraspResidualAction(ActionTerm):
         self._substep = 0
         self.final_pos, self.final_quat, self.pregrasp = refine_pose(
             self.task.seed_pos, self.task.seed_quat, actions, self.cfg)
+        strike_ids = (self.task.start_mode == 1).nonzero().flatten()
+        self.has_strike = len(strike_ids) > 0
+        if self.has_strike:
+            self._select_strike(strike_ids)
         data = self._env.sim.data
         self.start_pos = data.mocap_pos[:, self.mocap].clone()
         self.start_quat = data.mocap_quat[:, self.mocap].clone()
         self.lifted_pos = self.final_pos + 0.25 * self.unit[:, 2]
+
+    def _select_strike(self, env_ids):
+        task, bank = self.task, self.task.strike_bank
+        reference = task.strike_reference_id[env_ids]
+        hammer_pos, hammer_quat = bank["hammer_pos"][reference], bank["hammer_quat"][reference]
+        desired_pos = quat_apply_inverse(hammer_quat, self.final_pos[env_ids] - hammer_pos)
+        desired_quat = quat_mul(quat_conjugate(hammer_quat), self.final_quat[env_ids])
+        selected = torch.empty_like(env_ids)
+        for scene in task.scene_id[env_ids].unique():
+            mask = task.scene_id[env_ids] == scene
+            start, end = bank["strike_offsets"][scene:scene + 2]
+            distance = ((desired_pos[mask, None] - bank["rel_grasp_pos"][None, start:end])
+                        .norm(dim=-1) / 0.03).square()
+            desired, candidates = torch.broadcast_tensors(
+                desired_quat[mask, None], bank["rel_grasp_quat"][None, start:end])
+            angle = quat_error_magnitude(desired, candidates)
+            selected[mask] = (distance + (angle / (math.pi / 6)).square()).argmin(dim=-1) + start
+        restore_strike_state(self._env, env_ids, selected)
+        self.relative_closure_pos[env_ids] = bank["reference_closure_pos"][selected]
+        self.relative_closure_quat[env_ids] = bank["reference_closure_quat"][selected]
+        self._env.sim.forward()
+        self._env.sim.sense()
 
     def _write(self, pos, quat, grip=1.0):
         data = self._env.sim.data
         data.mocap_pos[:, self.mocap] = pos
         data.mocap_quat[:, self.mocap] = quat
         data.ctrl[:, self.actuator] = grip
+        if self.has_strike and self._substep <= self.swing_start:
+            hold = self.task.start_mode == 1
+            data.mocap_pos[hold, self.mocap] = self.task.strike_hold_pos[hold]
+            data.mocap_quat[hold, self.mocap] = self.task.strike_hold_quat[hold]
+            data.ctrl[hold] = self.task.strike_hold_ctrl[hold]
 
     def _relative_pose(self):
         data = self._env.sim.data
@@ -283,6 +317,7 @@ class GraspResidualAction(ActionTerm):
         # 各项权重由 env_cfg.py 注册；事件每次尝试只计一次，物理子步只更新评分缓存。
         # reset() 会清零评分和状态，因此未满足条件的尝试不会沿用上一回合的结果。
         k, data, values = self._substep, self._env.sim.data, self.values
+        is_strike = self.task.start_mode == 1
         if k in (self.closure_end, self.lift_end, self.swing_start):
             # 固定快照刷新 GPU 派生量，对应原脚本阶段结束后的 forward。
             self._env.sim.forward()
@@ -306,7 +341,8 @@ class GraspResidualAction(ActionTerm):
                 self.seat_frames.copy_(torch.where(seated, self.seat_frames + 1, 0))
                 if k == end:
                     values[name].copy_(self.seat_frames >= 5)
-        if k == self.closure_end or self.lift_end <= k <= self.unload_end:
+        if (k == self.closure_end or self.lift_end <= k <= self.unload_end
+                or (self.has_strike and k < self.lift_end)):
             contact = self._env.scene.sensors["handle_contact"].data
             # handle_contact 只检测六个指面与锤柄的接触，每个指面最多保留两个接触槽。
             # 12 个槽中前 6 个属于 narrow 侧，后 6 个属于 wide 侧；槽内有接触且法向力 > 0
@@ -315,18 +351,20 @@ class GraspResidualAction(ActionTerm):
             left, right = valid[:, :6].any(-1), valid[:, 6:].any(-1)
             bilateral = left & right
             if k == self.closure_end:
-                values["capture"].copy_((left.float() + right.float()) / 2)
-                self.relative_closure_pos, self.relative_closure_quat = (value.clone() for value in self._relative_pose())
-            if k > self.lift_end:
-                # A 之后持续评价到卸载结束；进入撤离后冻结，连续失联 20 ms 锁存掉落。
-                evaluating = ~self.returning
-                lost = (values["lift_success"] > 0) & ~bilateral
+                values["capture"].copy_((left.float() + right.float()) / 2 * ~is_strike)
+                p, q = self._relative_pose()
+                self.relative_closure_pos[~is_strike] = p[~is_strike]
+                self.relative_closure_quat[~is_strike] = q[~is_strike]
+            if k > self.lift_end or self.has_strike:
+                # A 从抬升后、B 从首次保持起评价；连续失联 20 ms 锁存掉落。
+                evaluating = ~self.returning & ((k > self.lift_end) | is_strike)
+                lost = ((values["lift_success"] > 0) | is_strike) & ~bilateral
                 self.lost_contact_steps.copy_(torch.where(evaluating,
                     torch.where(lost, self.lost_contact_steps + 1, 0), self.lost_contact_steps))
                 self.dropped |= evaluating & (self.lost_contact_steps >= self.substeps)
                 values["drop"].copy_(self.dropped)
         if k == self.lift_end:
-            # A 快照：抬升结束（当前为尝试开始后约 3.2 s）。抬升和几何评分在此时写入，
+            # 抬升结束快照（当前为尝试开始后约 3.2 s）。A 的抬升和几何评分在此写入，
             # wrap 在挥击前追加顶靠奖励；保存夹爪系下的锤子位姿，用于规划后续挥击轨迹。
             self.relative_a_pos, self.relative_a_quat = (value.clone() for value in self._relative_pose())
             initial = self.task.bank["hammer_pos"][self.task.scene_id, 2]
@@ -334,9 +372,10 @@ class GraspResidualAction(ActionTerm):
             # 有效抬升 lift：锤子相对本场景初态的真实高度增量 >= lift_threshold，且双侧接触。
             # lift_threshold 当前为 0.15 m；lift_success 是 0/1 日志值，也作为奖励的有效性门控。
             # 抬升失败时几何分为零；有双侧接触时仍可获得部分抬升进展分。
-            lift = (values["lift_height"] >= self._env.cfg.lift_threshold) & bilateral
+            lift = (values["lift_height"] >= self._env.cfg.lift_threshold) & bilateral & ~is_strike
             values["lift_success"].copy_(lift)
-            values["lift_progress"].copy_((values["lift_height"] / self._env.cfg.lift_threshold).clamp(0, 1) * bilateral)
+            values["lift_progress"].copy_((values["lift_height"] / self._env.cfg.lift_threshold).clamp(0, 1)
+                                          * bilateral * ~is_strike)
 
             # 1. 包覆奖励：抬升成功后，真包络角度评分放大 2 倍，加闭合/抬升顶靠奖励。
             values["wrap"].copy_(torch.where(lift, 2 * self.closure_enclosure
@@ -363,13 +402,13 @@ class GraspResidualAction(ActionTerm):
             # 按 A 快照规划后续固定挥击轨迹，同时准备后面投影接触力所需的目标端面法向。
             self._plan_strike()
         if k == self.swing_start:
-            # B 快照：搬运和预备姿态调整结束、即将挥击（当前约 16.2 s）。
-            # grasp_valid 要求 A 时刻已有效抬升、途中未锁存掉落，且 B 时刻仍有双侧有效接触；
-            # 它在此锁存并保留原控制含义；挥击中的实时保持条件仅用于评分。
-            self.grasp_valid.copy_((values["lift_success"] > 0) & bilateral & ~self.dropped)
+            # 挥击前快照（当前约 16.2 s）：A 需已有效抬升；B 需持续保持。
+            # 两者均要求未锁存掉落且当前双侧有效接触，在此锁存原挥击控制条件。
+            self.grasp_valid.copy_(torch.where(is_strike, bilateral & ~self.dropped,
+                (values["lift_success"] > 0) & bilateral & ~self.dropped))
             values["grasp_before_swing"].copy_(self.grasp_valid)
-            values["wrap"].add_(0.25 * self.grasp_valid * values["seat_before_swing"] / 1.5)
-            # 仅比较闭合结束与挥击前两点的相对位姿，之后复用这两个误差。
+            values["wrap"].add_(0.25 * self.grasp_valid * ~is_strike * values["seat_before_swing"] / 1.5)
+            # A 比较闭合结束与挥击前；B 比较所选真实快照与挥击前。
             p, q = self._relative_pose()
             values["translation_drift"].copy_((p - self.relative_closure_pos).norm(dim=-1))
             values["rotation_drift"].copy_(quat_error_magnitude(self.relative_closure_quat, q))
@@ -413,6 +452,9 @@ class GraspResidualAction(ActionTerm):
             values["mean_force"].copy_(values["impact_impulse"] / (window_steps * self._env.physics_dt))
             values["force"].copy_(torch.where(evaluating, values["mean_force"] / 10, values["force"]))
             values["task_success"].copy_(torch.where(evaluating, holding & (values["valid_strike"] > 0), values["task_success"]))
+        if k == self._env.cfg.decimation:
+            # auto-reset 会清零 values；训练日志读取本次已完成尝试的独立副本。
+            self.last_task_success.copy_(values["task_success"])
         if self.on_physics_step is not None:
             # 评估/回放时安装的逐子步回调，可用于显示或捕获最终指标。
             self.on_physics_step(self)

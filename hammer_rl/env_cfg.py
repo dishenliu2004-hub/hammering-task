@@ -27,6 +27,8 @@ SCENE = Path(__file__).resolve().parents[1] / "assets/scenes/scene.xml"
 @dataclass(kw_only=True)
 class HammerEnvCfg(ManagerBasedRlEnvCfg):
     data_file: str = "weight/hammer_rl/reset_bank.npz"
+    strike_data_file: str = "weight/hammer_rl/strike_reset_bank_256.npz"
+    strike_start_prob: float = 0.5
     stage: str = "teacher"  # teacher / distill / student
     split: str = "train"
 
@@ -60,6 +62,7 @@ def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
 
 
 def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/reset_bank.npz",
+                 strike_data_file="weight/hammer_rl/strike_reset_bank_256.npz", strike_start_prob=0.5,
                  stage="teacher", num_envs=128, split="train", seed=42,
                  training=True) -> HammerEnvCfg:
     # 使用总场景编译后的物理步长。
@@ -100,7 +103,9 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         events["physics"] = EventTermCfg(func=resets.randomize_physics, mode="reset")
     events["scene"] = EventTermCfg(func=resets.reset_scene, mode="reset")
 
-    cfg = HammerEnvCfg(data_file=str(data_file), stage=stage, split=split, seed=seed,
+    cfg = HammerEnvCfg(data_file=str(data_file), strike_data_file=str(strike_data_file),
+        strike_start_prob=strike_start_prob if training and split == "train" else 0.0,
+        stage=stage, split=split, seed=seed,
         randomize_physics=randomize, visual_noise=stage in ("distill", "student"),
         scene=SceneCfg(num_envs=num_envs, sensors=sensors,
             spec_fn=partial(_attach_scene, hammer_head_extra_mass=hammer_head_extra_mass)),

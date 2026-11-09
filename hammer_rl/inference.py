@@ -18,8 +18,8 @@ def load_models(checkpoint, device="cuda:0", *, with_critic=True):
     saved = json.loads((checkpoint.parent / "run_config.json").read_text())
     weights = torch.load(checkpoint, map_location=device, weights_only=False)
     cfg = saved["rl"]
-    obs = TensorDict({"privileged": torch.zeros(1, 87, device=device),
-        "public_seed": torch.zeros(1, 50, device=device),
+    obs = TensorDict({"privileged": torch.zeros(1, 88, device=device),
+        "public_seed": torch.zeros(1, 51, device=device),
         "depth": torch.zeros(1, 1, 120, 160, device=device)}, batch_size=[1])
 
     def build(model_cfg, groups, name, output_dim):
@@ -91,6 +91,7 @@ def select_grasp(actor, critic, depth, scene, grasps):
               ("finger_pos", "finger_vel", "camera_pos", "camera_quat", "intrinsics",
                "target_pos", "target_quat")}
     public = public_observation(seed_pos, seed_quat, tensor(grasps["widths"]), open_ctrl, **fields)
+    public = torch.cat((public, public.new_zeros((count, 1))), dim=-1)
     observations = TensorDict({"public_seed": public,
         "depth": tensor(depth).unsqueeze(0).expand(count, -1, -1, -1)}, batch_size=[count])
     return select_and_refine(actor, critic, observations,

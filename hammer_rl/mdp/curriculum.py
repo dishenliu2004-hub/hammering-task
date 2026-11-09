@@ -41,7 +41,8 @@ class SceneSgsCurriculum:
         temperature,
         epsilon,
     ):
-        completed = env.episode_length_buf[env_ids] >= 1
+        completed = ((env.episode_length_buf[env_ids] >= 1)
+                     & (self.task.start_mode[env_ids] == 0))
         if completed.any():
             completed_ids = env_ids[completed]
             # 课程在 reset 覆盖 scene_id 和动作评分前读取旧回合。

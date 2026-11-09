@@ -16,16 +16,20 @@ def depth(env):
     return env.hammer.depth
 
 
-def sync_data(env, data):
+def sync_data(env, data, env_id=0):
     task = env.hammer
-    scene = int(task.scene_id[0])
+    scene = int(task.scene_id[env_id])
     model = env.sim.mj_model
     model.body("hammer_Object").pos[:] = task.bank["reference_pos"][scene].cpu().numpy()
     model.body("hammer_Object").quat[:] = task.bank["reference_quat"][scene].cpu().numpy()
+    h = task.handle_geom_id
+    for name in ("geom_size", "geom_rbound", "geom_aabb"):
+        getattr(model, name)[h] = (getattr(env.sim.model, name)[env_id, h].cpu().numpy()
+                                  .reshape(getattr(model, name)[h].shape))
     if env.cfg.randomize_physics:
-        model.body_mass[:] = env.sim.model.body_mass[0].cpu().numpy()
-        model.body_inertia[:] = env.sim.model.body_inertia[0].cpu().numpy()
-        model.geom_friction[:] = env.sim.model.geom_friction[0].cpu().numpy()
+        model.body_mass[:] = env.sim.model.body_mass[env_id].cpu().numpy()
+        model.body_inertia[:] = env.sim.model.body_inertia[env_id].cpu().numpy()
+        model.geom_friction[:] = env.sim.model.geom_friction[env_id].cpu().numpy()
     mujoco.mj_setConst(model, data)
-    mujoco_warp.get_data_into(data, model, env.sim.wp_data)
+    mujoco_warp.get_data_into(data, model, env.sim.wp_data, world_id=env_id)
     mujoco.mj_forward(model, data)

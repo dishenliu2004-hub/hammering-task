@@ -18,6 +18,16 @@ from .mdp.observations import sync_data
 from .inference import load_models, select_candidates
 
 
+def candidate_batches(env, pairs, episodes):
+    """显式绑定 A 场景/候选，供评估和离线抓持快照采集共用。"""
+    for first in range(0, episodes, env.num_envs):
+        selected = torch.tensor([pairs[i % len(pairs)]
+            for i in range(first, first + env.num_envs)], device=env.device)
+        env.hammer.selection = selected.unbind(-1)
+        env.reset()
+        yield first, selected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank.npz")
@@ -98,11 +108,9 @@ def main():
                         viewer.sync()
                         time.sleep(max(0.0, 0.02 - (time.monotonic() - start)))
                 env.action_manager.get_term("grasp").on_physics_step = display
-            for first in range(0, args.episodes, count):
-                selected = [pairs[i % len(pairs)] for i in range(first, first + count)]
-                scene, candidate = torch.tensor(selected, device=env.device).unbind(-1)
-                env.hammer.selection = (scene, candidate)
-                env.reset()
+            for first, selected_tensor in candidate_batches(env, pairs, args.episodes):
+                scene, candidate = selected_tensor.unbind(-1)
+                selected = selected_tensor.tolist()
                 # 环境会保留本批生成的状态张量，供下一批在上下文外 reset。
                 with torch.no_grad():
                     if args.selection == "learned":

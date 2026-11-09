@@ -4,9 +4,10 @@ from contextlib import contextmanager
 from functools import cache
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 from types import SimpleNamespace
 
 import numpy as np
@@ -116,6 +117,31 @@ def infer(input_path, output_path):
         )
 
 
+def _run_anygrasp(input_path, output_path):
+    """把 SDK 输出带回父进程，并保留失败输入，避免临时目录清理后无法复现。"""
+    command = [ANYGRASP_PY, "-u", str(Path(__file__).resolve()), "--infer",
+               str(input_path), str(output_path)]
+    result = subprocess.run(
+        command, cwd=ROOT / "weight/local_runtime",
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0 or not output_path.is_file():
+        failure_root = ROOT / "weight/anygrasp_failures"
+        failure_root.mkdir(parents=True, exist_ok=True)
+        failure_dir = Path(mkdtemp(prefix="infer_", dir=failure_root))
+        shutil.copy2(input_path, failure_dir / "cloud.npz")
+        (failure_dir / "infer.log").write_text(result.stdout, encoding="utf-8")
+        reason = (f"退出码 {result.returncode}" if result.returncode != 0
+                  else "退出码为 0，但没有生成 grasps.npz")
+        raise RuntimeError(
+            f"AnyGrasp 推理失败（{reason}，输入点云及日志：{failure_dir}）。\n"
+            f"子进程输出：\n{result.stdout}"
+        )
+    if result.stdout:
+        print(result.stdout, end="", flush=True)
+
+
 def generate_grasps(model, data, frame, *, full_scene=False, workspace_bounds=None,
                     convert_first=True):
     # 完整点云按锤柄和锤头颜色定位裁剪；相机点云沿用锤柄附近 0.30 米的工作空间。
@@ -151,15 +177,7 @@ def generate_grasps(model, data, frame, *, full_scene=False, workspace_bounds=No
         input_path = Path(directory) / "cloud.npz"
         output_path = Path(directory) / "grasps.npz"
         np.savez(input_path, points=points, colors=colors, lims=lims)
-        subprocess.run(
-            [ANYGRASP_PY, str(Path(__file__).resolve()), "--infer", str(input_path), str(output_path)],
-            cwd=ROOT / "weight/local_runtime", check=True,
-        )
-        if not output_path.is_file():
-            raise RuntimeError(
-                "AnyGrasp 子进程未生成抓取结果，可能在授权或 SDK 加载阶段提前退出；"
-                "请检查上方 AnyGrasp 日志。"
-            )
+        _run_anygrasp(input_path, output_path)
         with np.load(output_path) as output:
             grasps = {name: output[name] for name in output.files}
 
