@@ -31,13 +31,17 @@ def initialize_task(env):
         depth=torch.zeros((env.num_envs, 1, 120, 160), device=env.device),
         sampling_weights=((bank["split"] == (env.cfg.split == "eval")).float()),
         selection=None, hammer_id=model.body("hammer_Object").id,
+        handle_geom_id=model.geom("hammer_handle").id,
+        narrow_driver_id=model.joint("gripper_hand_narrow1_joint").id,
+        wide_driver_id=model.joint("gripper_hand_wide1_joint").id,
         mocap_id=int(model.body_mocapid[model.body("gripper_mount").id]),
         base_qadr=int(model.joint("gripper_base_free").qposadr[0]),
         base_vadr=int(model.joint("gripper_base_free").dofadr[0]),
         finger_ids=torch.tensor([model.geom(name).id for name in FINGER_GEOMS], device=env.device),
         nominal_mass=torch.as_tensor(model.body_mass.copy(), dtype=torch.float32, device=env.device),
         nominal_inertia=torch.as_tensor(model.body_inertia.copy(), dtype=torch.float32, device=env.device),
-        nominal_friction=torch.as_tensor(model.geom_friction.copy(), dtype=torch.float32, device=env.device))
+        nominal_friction=torch.as_tensor(model.geom_friction.copy(), dtype=torch.float32, device=env.device),
+        nominal_joint_range=torch.as_tensor(model.jnt_range.copy(), dtype=torch.float32, device=env.device))
     task.finger_qadr = torch.tensor([int(model.joint(i).qposadr[0]) for i in range(model.njnt)
                                    if model.joint(i).name.startswith("gripper_hand_")], device=env.device)
     task.finger_vadr = torch.tensor([int(model.joint(i).dofadr[0]) for i in range(model.njnt)
@@ -50,7 +54,7 @@ def initialize_task(env):
     task.privileged = torch.zeros((env.num_envs, 87), device=env.device)
 
 
-@requires_model_fields("geom_friction", "body_mass", "body_inertia", recompute=RecomputeLevel.set_const)
+@requires_model_fields("geom_friction", "body_mass", "body_inertia", "jnt_range", recompute=RecomputeLevel.set_const)
 def randomize_physics(env, env_ids):
     task, model = env.hammer, env.sim.model
     count, body = len(env_ids), task.hammer_id
@@ -59,6 +63,14 @@ def randomize_physics(env, env_ids):
     model.body_inertia[env_ids, body] = task.nominal_inertia[body] * scale
     friction = torch.empty((count, 1, 1), device=env.device).uniform_(*env.cfg.friction_range)
     model.geom_friction[env_ids[:, None], task.finger_ids] = task.nominal_friction[task.finger_ids] * friction
+    open_delta = torch.empty(count, device=env.device).uniform_(0.0, 0.02)
+    close_delta = torch.empty(count, device=env.device).uniform_(0.0, 0.06)
+    narrow_base = task.nominal_joint_range[task.narrow_driver_id]
+    wide_base = task.nominal_joint_range[task.wide_driver_id]
+    model.jnt_range[env_ids, task.narrow_driver_id, 0] = narrow_base[0] - open_delta
+    model.jnt_range[env_ids, task.narrow_driver_id, 1] = narrow_base[1] - close_delta
+    model.jnt_range[env_ids, task.wide_driver_id, 0] = wide_base[0] + close_delta
+    model.jnt_range[env_ids, task.wide_driver_id, 1] = wide_base[1] + open_delta
 
 
 def public_observation(seed_pos, seed_quat, widths, open_ctrl, *, finger_pos, finger_vel,
@@ -130,7 +142,8 @@ def bind_candidates(env, env_ids, candidate):
     return obs
 
 
-@requires_model_fields("body_pos", "body_quat", recompute=RecomputeLevel.set_const_0)
+@requires_model_fields("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
+                       recompute=RecomputeLevel.set_const_0)
 def reset_scene(env, env_ids):
     task, data, model = env.hammer, env.sim.data, env.sim.model
     bank, count = task.bank, len(env_ids)
@@ -143,6 +156,14 @@ def reset_scene(env, env_ids):
         scene, candidate = task.selection
         scene, candidate = scene[env_ids], candidate[env_ids]
     task.scene_id[env_ids] = scene
+    sizes = bank["handle_size"][scene]
+    radius, half_length = sizes[:, 0], sizes[:, 1]
+    h = task.handle_geom_id
+    model.geom_size[env_ids, h, :2] = sizes
+    model.geom_rbound[env_ids, h] = radius + half_length
+    model.geom_aabb[env_ids, h, 1, 0] = radius
+    model.geom_aabb[env_ids, h, 1, 1] = radius
+    model.geom_aabb[env_ids, h, 1, 2] = radius + half_length
     model.body_pos[env_ids, task.hammer_id] = bank["reference_pos"][scene]
     model.body_quat[env_ids, task.hammer_id] = bank["reference_quat"][scene]
     for name in STATE_FIELDS:

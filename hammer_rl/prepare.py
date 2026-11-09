@@ -11,6 +11,7 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from generation.enclosure import build_enclosure_geometry
 from generation.grasp_hammer import generate_grasps, candidate_to_mount
 from generation.hammer_generate import create_simulation, sync_data, SCENE
 from generation.hammer_inertia import add_head_mass
@@ -24,6 +25,9 @@ WORKSPACE = ((0.14, -0.16, 0.11), (0.46, 0.41, 0.72))
 def create_scene(rng, hammer_head_extra_mass=0.0):
     spec = mujoco.MjSpec.from_file(str(SCENE))
     add_head_mass(spec, hammer_head_extra_mass)
+    handle = spec.geom("hammer_handle")
+    handle.size[0] *= rng.uniform(0.95, 1.05)
+    handle.size[1] *= rng.uniform(0.95, 1.05)
     model = spec.compile()
     model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     model.geom("hammer_head").condim[0] = 6
@@ -103,8 +107,11 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0):
     from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
 
     model, data, simulation = create_scene(rng, hammer_head_extra_mass)
+    geometry = build_enclosure_geometry(model, "cpu")
     sample = {name: getattr(data, name).copy() for name in STATE_FIELDS}
-    sample.update(reference_pos=model.body("hammer_Object").pos.copy(),
+    sample.update(handle_size=model.geom("hammer_handle").size[:2].copy(),
+                  handle_convex_planes=geometry.convex_parts[geometry.handle_part_index].numpy(),
+                  reference_pos=model.body("hammer_Object").pos.copy(),
                   reference_quat=model.body("hammer_Object").quat.copy(),
                   hammer_pos=data.body("hammer_Object").xpos.copy(),
                   hammer_quat=data.body("hammer_Object").xquat.copy(),

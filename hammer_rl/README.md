@@ -27,7 +27,7 @@ Torch 2.9.0+cu128、rsl-rl-lib 5.4.2。
 
 ```bash
 python -m hammer_rl.prepare \
-  --output weight/hammer_rl/reset_bank_256.npz \
+  --output weight/hammer_rl/reset_bank_dr_256.npz \
   --num-scenes 256 \
   --candidates-per-scene 32 \
   --seed 42 \
@@ -45,6 +45,19 @@ python -m hammer_rl.prepare \
 缓存保存观察窗口结束后的状态、`(1,120,160)` 深度和原有 AnyGrasp 候选及 `offsets`，
 不再保存 `placement`、`difficulty`。全部场景由 `--seed` 可复现地置乱，
 约 20% 标记为 eval，其余为 train；训练 reset 只抽取离线缓存。
+
+每个场景在编译前分别对锤柄 capsule 半径和圆柱段半长乘以 `U(0.95,1.05)`，
+此形态在沉降重采样中保持固定，深度和 AnyGrasp 候选均来自该实际模型。
+新 bank 增加场景级 `handle_size`、`handle_convex_planes`；reset 按 `scene_id` 恢复
+锤柄尺寸及碰撞包围体，包络评分使用同一场景缓存的凸包。
+旧 bank 缺少必需字段，必须重新生成；使用新的输出路径保留旧数据。
+新训练、校准及评估须明确指向同一版 bank；另建的评估 bank 也须由新版 prepare 生成。
+权重张量格式不变，但旧权重未针对新随机化域训练，建议用新 bank 从头完成三阶段训练。
+
+教师、蒸馏和学生在每次 reset 使用同一在线物理分布：质量/惯量倍率 `U(0.90,1.10)`、
+同环境各指面共享摩擦倍率 `U(0.80,1.20)`，两侧主驱动关节共享开口端扩展量
+`U(0,0.02) rad` 与闭合端收紧量 `U(0,0.06) rad`，每次从名义限位计算镜像范围。
+教师不加深度噪声，蒸馏和学生保留已有 `DepthNoise`；SGS 仍以固定形态的场景为单位。
 
 ## 3. 教师 PPO 训练
 
@@ -93,7 +106,7 @@ q_eval = 0
 ```bash
 python -m hammer_rl.train \
   --stage teacher \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
+  --data-file weight/hammer_rl/reset_bank_dr_256.npz \
   --num-envs 256 \
   --max-iterations 3000 \
   --device cuda:0 \
@@ -108,7 +121,7 @@ python -m hammer_rl.train \
 ```bash
 python -m hammer_rl.train \
   --stage distill \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
+  --data-file weight/hammer_rl/reset_bank_dr_256.npz \
   --teacher-checkpoint weight/hammer_rl/runs/teacher/formal_02/model_2999.pt \
   --num-envs 128 \
   --max-iterations 1000 \
@@ -132,7 +145,7 @@ actor 与 critic 使用各自的 CNN 和归一化统计；此阶段默认开启�
 ```bash
 python -m hammer_rl.train \
   --stage student \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
+  --data-file weight/hammer_rl/reset_bank_dr_256.npz \
   --init-from weight/hammer_rl/runs/distill/formal_01/model_999.pt \
   --num-envs 128 \
   --max-iterations 3000 \
@@ -161,6 +174,7 @@ actor 的确定性残差，以当前实际总奖励为标签，仅通过 MSE 更
 ```bash
 python -m hammer_rl.calibrate \
   --checkpoint weight/hammer_rl/runs/student/formal_01/model_best.pt \
+  --data-file weight/hammer_rl/reset_bank_dr_256.npz \
   --num-envs 16 \
   --repeats 1 \
   --epochs 20 \
@@ -260,15 +274,15 @@ python -m visualization.compare_hammering \
 ```bash
 python -m hammer_rl.compare_evaluations \
   --checkpoint weight/hammer_rl/runs/teacher/finish_01/model_best.pt \
-  --data-file weight/hammer_rl/eval_bank_128.npz \
+  --data-file weight/hammer_rl/reset_bank_dr_256.npz \
   --output-dir weight/hammer_rl/runs/teacher/finish_01/comparison_01 \
   --anygrasp-extra-depth 0.03
 ```
 
 分别运行 SDK 最高分＋零残差、critic 选择＋actor 残差两组，每组每场景执行一次。
-省略 `--data-file` 时使用连续生成的 `reset_bank_256.npz` 留出的约 20% 场景
-（256 场景时为 51 个），每场景最多 32 个候选；
-上例的自定义 `eval_bank_128.npz` 也需使用连续场景缓存，实际评估范围由其中 `split` 决定。
+该入口默认文件名仍为 `reset_bank_256.npz`，本次应按上例显式指定新 bank，
+使用其中留出的约 20% 场景（256 场景时为 51 个），每场景最多 32 个候选。
+自定义评估 bank 也须由新版 prepare 生成，实际评估范围由其中 `split` 决定。
 候选经过 AnyGrasp NMS，再以最高分位姿为起点，按平移和旋转距离做最远点采样。
 可用 `--episodes 4 --num-envs 4` 做短运行，或 `--data-file` 指定其他多候选缓存。
 
@@ -285,7 +299,7 @@ python -m hammer_rl.compare_evaluations \
 
 ```bash
 python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_256.npz \
+  --data-file weight/hammer_rl/reset_bank_dr_256.npz \
   --policy trained --selection learned \
   --checkpoint weight/hammer_rl/runs/teacher/formal_02/calibration_model_best/deployment.pt \
   --split eval --episodes 0 --num-envs 16 --headless \
@@ -294,7 +308,8 @@ python -m hammer_rl.evaluate \
 
 `--selection all` 是原有逐候选评估，也是默认值；`sdk` 和 `learned` 每场景执行一次。
 `learned` 使用包含 actor 和 critic 的教师/学生 PPO 或部署权重；`all/sdk` 仍支持蒸馏 actor。
-评估默认名义物理参数，`--noise` 开启深度噪声，`--seed` 默认 42。
+评估默认关闭在线物理/限位随机化，但仍按评估 bank 恢复离线锤柄形态，
+因此名义物理参数评估仍包含 bank 中的形态变化；`--noise` 开启深度噪声，`--seed` 默认 42。
 
 ### 9.1 学生在线推理接口
 

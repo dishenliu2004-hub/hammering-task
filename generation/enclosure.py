@@ -22,6 +22,7 @@ def build_enclosure_geometry(model, device):
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     hammer = model.body("hammer_Object").id
+    handle = model.geom("hammer_handle").id
     root_rotation = data.xmat[hammer].reshape(3, 3)
     parts = []
     for geom_id in np.flatnonzero(model.geom_bodyid == hammer):
@@ -38,6 +39,8 @@ def build_enclosure_geometry(model, device):
         local = ((vertices @ rotation.T + data.geom_xpos[geom_id]) - data.xpos[hammer]) @ root_rotation
         equations = ConvexHull(local).equations.copy()
         equations[:, 3] -= 0.001 * np.linalg.norm(equations[:, :3], axis=1)
+        if geom_id == handle:
+            handle_part_index = len(parts)
         parts.append(torch.tensor(equations, dtype=torch.float32, device=device))
 
     base = model.body("gripper_base_link").id
@@ -57,6 +60,7 @@ def build_enclosure_geometry(model, device):
     directions /= np.linalg.norm(directions, axis=1, keepdims=True)
     return SimpleNamespace(
         hammer=hammer, base=base, convex_parts=tuple(parts), support_height=float(palm_local[:, 2].max()),
+        handle_part_index=handle_part_index,
         second_joints=[model.joint(f"gripper_hand_{side}2_joint").id for side in sides],
         distal_joints=[model.joint(f"gripper_hand_{side}3_joint").id for side in sides],
         distal_bodies=[model.body(f"gripper_hand_{side}3_Link").id for side in sides],
@@ -81,8 +85,8 @@ def _segment_union_inside_length(origin, direction, length_m, convex_parts):
     """direct_rollout 同名函数的批量半空间裁剪及区间并集。"""
     starts, stops = [], []
     for equations in convex_parts:
-        values = origin @ equations[:, :3].T + equations[:, 3]
-        slopes = direction @ equations[:, :3].T
+        values = (origin[:, :, None, :] * equations[:, None, :, :3]).sum(-1) + equations[:, None, :, 3]
+        slopes = (direction[:, :, None, :] * equations[:, None, :, :3]).sum(-1)
         parallel = slopes.abs() <= 1e-12
         boundary = -values / torch.where(parallel, 1.0, slopes)
         lower = torch.where(~parallel & (slopes < 0), boundary, 0.0).amax(-1)
@@ -138,7 +142,7 @@ def enclosure_score(left, right, outer_any):
     return torch.where(upper <= ENCLOSURE_EPSILON, 0.0, torch.where(outer_any, negative, positive))
 
 
-def compute_enclosure_score(data, geometry, palm_contact):
+def compute_enclosure_score(data, geometry, palm_contact, handle_planes):
     """返回闭合末帧的 y_true_enc * S_enc(angle)，每个环境一个得分。"""
     base_rotation = data.xmat[:, geometry.base].reshape(-1, 3, 3)
     origins = data.site_xpos[:, geometry.origins]
@@ -148,7 +152,9 @@ def compute_enclosure_score(data, geometry, palm_contact):
     target_rotation = data.xmat[:, geometry.hammer].reshape(-1, 3, 3)
     origins_local = (origins - data.xpos[:, geometry.hammer, None]) @ target_rotation
     directions_local = directions @ target_rotation
-    penetration = _segment_union_inside_length(origins_local, directions_local, lengths, geometry.convex_parts)
+    convex_parts = [part.unsqueeze(0).expand(origins.shape[0], -1, -1) for part in geometry.convex_parts]
+    convex_parts[geometry.handle_part_index] = handle_planes
+    penetration = _segment_union_inside_length(origins_local, directions_local, lengths, convex_parts)
     true_enclosure = palm_contact & valid & (penetration <= 0.003).all(-1)
 
     # 原 v4 TCP 与 base 同向，局部位置为 (0, 0, 0.14825)。

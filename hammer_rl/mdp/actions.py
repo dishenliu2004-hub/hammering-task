@@ -293,7 +293,7 @@ class GraspResidualAction(ActionTerm):
             self.palm_frames.copy_(torch.where(strong, self.palm_frames + 1, 0))
             if k == self.closure_end:
                 self.closure_enclosure.copy_(compute_enclosure_score(data, self.enclosure_geometry,
-                                                                    self.palm_frames >= 5))
+                    self.palm_frames >= 5, self.task.bank["handle_convex_planes"][self.task.scene_id]))
         # 每个关键时点只检查末尾五个 250 Hz 采样帧，包含终态。
         for end, name in ((self.closure_end, "seat_closure"), (self.lift_end, "seat_lift"),
                           (self.swing_start, "seat_before_swing")):

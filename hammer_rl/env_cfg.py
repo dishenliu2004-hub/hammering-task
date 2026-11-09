@@ -93,15 +93,15 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
             fields=("found", "force"), reduce="netforce"),
     )
 
-    # 蒸馏和学生阶段默认启用物理及深度随机化。
-    randomize = stage in ("distill", "student")
+    # 三个阶段使用同一物理随机化分布；深度噪声仅用于蒸馏和学生。
+    randomize = True
     events = {}
     if randomize:
         events["physics"] = EventTermCfg(func=resets.randomize_physics, mode="reset")
     events["scene"] = EventTermCfg(func=resets.reset_scene, mode="reset")
 
     cfg = HammerEnvCfg(data_file=str(data_file), stage=stage, split=split, seed=seed,
-        randomize_physics=randomize, visual_noise=randomize,
+        randomize_physics=randomize, visual_noise=stage in ("distill", "student"),
         scene=SceneCfg(num_envs=num_envs, sensors=sensors,
             spec_fn=partial(_attach_scene, hammer_head_extra_mass=hammer_head_extra_mass)),
         sim=SimulationCfg(nconmax=128, njmax=1024, contact_sensor_maxmatch=128, mujoco=MujocoCfg(
