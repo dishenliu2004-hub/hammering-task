@@ -144,7 +144,7 @@ python -m hammer_rl.train \
   --stage teacher \
   --data-file weight/hammer_rl/reset_bank_dr_256.npz \
   --strike-data-file weight/hammer_rl/strike_reset_bank_256.npz \
-  --strike-start-prob 0.5 \
+  --strike-start-prob 0.1 \
   --num-envs 256 \
   --max-iterations 3000 \
   --device cuda:0 \

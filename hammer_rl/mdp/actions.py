@@ -450,7 +450,7 @@ class GraspResidualAction(ActionTerm):
                          & (k - self.first_hit_step < window_steps))
             values["impact_impulse"].add_(torch.where(evaluating & holding & in_window, force * self._env.physics_dt, 0))
             values["mean_force"].copy_(values["impact_impulse"] / (window_steps * self._env.physics_dt))
-            values["force"].copy_(torch.where(evaluating, values["mean_force"] / 10, values["force"]))
+            values["force"].copy_(torch.where(evaluating, values["mean_force"], values["force"]))
             values["task_success"].copy_(torch.where(evaluating, holding & (values["valid_strike"] > 0), values["task_success"]))
         if k == self._env.cfg.decimation:
             # auto-reset 会清零 values；训练日志读取本次已完成尝试的独立副本。

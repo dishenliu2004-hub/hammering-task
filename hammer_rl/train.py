@@ -91,7 +91,7 @@ def main():
     parser.add_argument("--strike-data-file", default="weight/hammer_rl/strike_reset_bank_256.npz")
     parser.add_argument("--strike-start-prob", type=float, default=0.5)
     parser.add_argument("--num-envs", type=int, default=128)
-    parser.add_argument("--max-iterations", type=int, default=3000, help="本次追加的 update 数")
+    parser.add_argument("--max-iterations", type=int, default=5000, help="本次追加的 update 数")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", type=Path)
