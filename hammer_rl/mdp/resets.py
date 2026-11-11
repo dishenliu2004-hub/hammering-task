@@ -1,4 +1,4 @@
-"""原场景抓取起点与离线真实抓持快照共用的 reset 和冻结观测。"""
+"""原场景抓取起点的 reset 和冻结观测。"""
 
 from types import SimpleNamespace
 
@@ -9,6 +9,7 @@ from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, quat_conjugate, quat_mul
 
 from visualization.noise.depth_noise import DepthNoise
+from generation.hammer_geometry import HEAD_CENTER_LOCAL
 
 STATE_FIELDS = ("qpos", "qvel", "act", "ctrl", "mocap_pos", "mocap_quat", "eq_active",
                 "qfrc_applied", "xfrc_applied", "qacc_warmstart")
@@ -22,20 +23,18 @@ def initialize_task(env):
         bank = {key: torch.as_tensor(source[key], device=env.device,
                   dtype=torch.float32 if source[key].dtype.kind == "f" else None)
                 for key in source.files}
-    strike_bank = None
-    if env.cfg.strike_start_prob > 0:
-        with np.load(env.cfg.strike_data_file) as source:
-            strike_bank = {key: torch.as_tensor(source[key], device=env.device,
-                dtype=torch.float32 if source[key].dtype.kind == "f" else None)
-                for key in source.files}
+    with np.load(env.cfg.b_pose_file) as source:
+        b_bank = {key: torch.as_tensor(source[key], device=env.device,
+                  dtype=torch.float32 if source[key].dtype.kind == "f" else None)
+                  for key in source.files}
     model = env.sim.mj_model
     ids = torch.arange(env.num_envs, device=env.device)
     task = SimpleNamespace(bank=bank, scene_id=ids * 0, candidate_id=ids * 0,
-        start_mode=ids * 0, strike_bank=strike_bank,
-        strike_reference_id=ids * 0, strike_selected_id=ids * 0,
-        strike_hold_pos=torch.zeros((env.num_envs, 3), device=env.device),
-        strike_hold_quat=torch.zeros((env.num_envs, 4), device=env.device),
-        strike_hold_ctrl=torch.zeros_like(env.sim.data.ctrl),
+        b_bank=b_bank, b_pose_id=ids * 0, b_selection=None,
+        b_scenes=(b_bank["split"] == (env.cfg.split == "eval")).nonzero().flatten(),
+        b_target_pos=torch.zeros((env.num_envs, 3), device=env.device),
+        b_target_quat=torch.zeros((env.num_envs, 4), device=env.device),
+        b_nominal_face=torch.zeros((env.num_envs, 3), device=env.device),
         seed_pos=torch.zeros((env.num_envs, 3), device=env.device),
         seed_quat=torch.zeros((env.num_envs, 4), device=env.device),
         open_ctrl=torch.zeros(env.num_envs, device=env.device),
@@ -60,12 +59,9 @@ def initialize_task(env):
     task.noise = DepthNoise(focal_length=float(bank["intrinsics"][0, 0]), baseline=0.05,
                            min_depth=0.3, max_depth=3.0, filter_size=3).to(env.device)
     env.hammer = task
-    if strike_bank is not None:
-        task.strike_scenes = ((bank["split"] == 0) &
-            (strike_bank["strike_offsets"][1:] > strike_bank["strike_offsets"][:-1])).nonzero().flatten()
     # 构造 observation manager 时只需确定维度；第一次 reset 才写真实初始观测。
-    task.public = torch.zeros((env.num_envs, 51), device=env.device)
-    task.privileged = torch.zeros((env.num_envs, 88), device=env.device)
+    task.public = torch.zeros((env.num_envs, 57), device=env.device)
+    task.privileged = torch.zeros((env.num_envs, 94), device=env.device)
 
 
 @requires_model_fields("geom_friction", "body_mass", "body_inertia", "jnt_range", recompute=RecomputeLevel.set_const)
@@ -110,11 +106,11 @@ def candidate_observations(env, env_ids, candidate):
     return _initial_observations(env, env_ids, candidate, seed_pos, seed_quat,
         object_pos, object_quat,
         bank["qpos"][scene[:, None], task.finger_qadr],
-        bank["qvel"][scene[:, None], task.finger_vadr], task.depth[env_ids], mode=0)
+        bank["qvel"][scene[:, None], task.finger_vadr], task.depth[env_ids])
 
 
 def _initial_observations(env, env_ids, candidate, seed_pos, seed_quat,
-                          object_pos, object_quat, finger_pos, finger_vel, depth, *, mode):
+                          object_pos, object_quat, finger_pos, finger_vel, depth):
     task, model = env.hammer, env.sim.model
     bank, count = task.bank, len(env_ids)
     scene = task.scene_id[env_ids]
@@ -124,8 +120,7 @@ def _initial_observations(env, env_ids, candidate, seed_pos, seed_quat,
         **{key: bank[key][scene] for key in
            ("camera_pos", "camera_quat", "intrinsics", "target_pos", "target_quat")})
     # 所有量冻结于本次决策前；不包含执行后的评分。
-    head_offset = torch.zeros_like(object_pos)
-    head_offset[:, 0] = -0.24
+    head_offset = object_pos.new_tensor(HEAD_CENTER_LOCAL).expand_as(object_pos)
     support_size = torch.tensor([0.42, 0.20, 0.37], device=env.device).expand(count, -1)
     mass = (model.body_mass[env_ids, task.hammer_id] if env.cfg.randomize_physics else
             task.nominal_mass[task.hammer_id].expand(count))
@@ -139,9 +134,9 @@ def _initial_observations(env, env_ids, candidate, seed_pos, seed_quat,
         object_pos + quat_apply(object_quat, head_offset),
         bank["support_pos"][scene], bank["support_quat"][scene], support_size,
         mass[:, None], inertia, friction), dim=-1)
-    start_mode = public.new_full((count, 1), mode)
-    return TensorDict({"public_seed": torch.cat((public, start_mode), dim=-1),
-                       "privileged": torch.cat((privileged, start_mode), dim=-1),
+    b_target = torch.cat((task.b_target_pos[env_ids], task.b_target_quat[env_ids]), dim=-1)
+    return TensorDict({"public_seed": torch.cat((public, b_target), dim=-1),
+                       "privileged": torch.cat((privileged, b_target), dim=-1),
                        "depth": depth}, batch_size=[count])
 
 
@@ -168,54 +163,22 @@ def bind_candidates(env, env_ids, candidate):
     return obs
 
 
-def restore_strike_state(env, env_ids, rows):
-    """只恢复仿真数据，保留场景模型和本回合的物理随机化。"""
-    task, data = env.hammer, env.sim.data
-    for name in STATE_FIELDS:
-        getattr(data, name)[env_ids] = task.strike_bank[name][rows]
-    data.time[env_ids] = 0
-    task.strike_selected_id[env_ids] = rows
-    task.strike_hold_pos[env_ids] = data.mocap_pos[env_ids, task.mocap_id]
-    task.strike_hold_quat[env_ids] = data.mocap_quat[env_ids, task.mocap_id]
-    task.strike_hold_ctrl[env_ids] = data.ctrl[env_ids]
-
-
-def bind_strike_reference(env, env_ids, rows):
-    task, bank = env.hammer, env.hammer.strike_bank
-    restore_strike_state(env, env_ids, rows)
-    task.strike_reference_id[env_ids] = rows
-    candidate = bank["candidate_id"][rows]
-    task.candidate_id[env_ids] = candidate
-    object_pos, object_quat = bank["hammer_pos"][rows], bank["hammer_quat"][rows]
-    seed_pos = object_pos + quat_apply(object_quat, bank["rel_grasp_pos"][rows])
-    seed_quat = quat_mul(object_quat, bank["rel_grasp_quat"][rows])
-    task.seed_pos[env_ids], task.seed_quat[env_ids] = seed_pos, seed_quat
-    task.open_ctrl[env_ids] = task.bank["open_ctrl"][candidate]
-    depth = bank["depth"][rows]
-    task.depth[env_ids] = task.noise(depth) if env.cfg.visual_noise else depth
-    obs = _initial_observations(env, env_ids, candidate, seed_pos, seed_quat,
-        object_pos, object_quat,
-        bank["qpos"][rows[:, None], task.finger_qadr],
-        bank["qvel"][rows[:, None], task.finger_vadr], task.depth[env_ids], mode=1)
-    task.public[env_ids], task.privileged[env_ids] = obs["public_seed"], obs["privileged"]
-
-
 @requires_model_fields("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
                        recompute=RecomputeLevel.set_const_0)
 def reset_scene(env, env_ids):
     task, data, model = env.hammer, env.sim.data, env.sim.model
     bank, count = task.bank, len(env_ids)
-    task.start_mode[env_ids] = 0
+    b_pose = (task.b_scenes[torch.randint(len(task.b_scenes), (count,), device=env.device)]
+              if task.b_selection is None else task.b_selection[env_ids])
+    task.b_pose_id[env_ids] = b_pose
+    task.b_target_pos[env_ids] = task.b_bank["hammer_pos"][b_pose]
+    task.b_target_quat[env_ids] = task.b_bank["hammer_quat"][b_pose]
+    task.b_nominal_face[env_ids] = task.b_bank["nominal_face_center"][b_pose]
     if task.selection is None:
         scene = torch.multinomial(task.sampling_weights, count, replacement=True)
         start = bank["offsets"][scene]
         candidate = start + (torch.rand(count, device=env.device) *
                             (bank["offsets"][scene + 1] - start)).long()
-        if env.cfg.strike_start_prob > 0:
-            is_strike = torch.rand(count, device=env.device) < env.cfg.strike_start_prob
-            task.start_mode[env_ids] = is_strike.long()
-            scene[is_strike] = task.strike_scenes[torch.randint(
-                len(task.strike_scenes), (int(is_strike.sum()),), device=env.device)]
     else:
         scene, candidate = task.selection
         scene, candidate = scene[env_ids], candidate[env_ids]
@@ -233,16 +196,6 @@ def reset_scene(env, env_ids):
     for name in STATE_FIELDS:
         getattr(data, name)[env_ids] = bank[name][scene]
     data.time[env_ids] = 0
-    grasp_ids = env_ids[task.start_mode[env_ids] == 0]
-    if len(grasp_ids):
-        depth = bank["depth"][task.scene_id[grasp_ids]]
-        task.depth[grasp_ids] = task.noise(depth) if env.cfg.visual_noise else depth
-        bind_candidates(env, grasp_ids, candidate[task.start_mode[env_ids] == 0])
-    strike_ids = env_ids[task.start_mode[env_ids] == 1]
-    if len(strike_ids):
-        strike_scene = task.scene_id[strike_ids]
-        offsets = task.strike_bank["strike_offsets"]
-        start = offsets[strike_scene]
-        rows = start + (torch.rand(len(strike_ids), device=env.device) *
-                        (offsets[strike_scene + 1] - start)).long()
-        bind_strike_reference(env, strike_ids, rows)
+    depth = bank["depth"][scene]
+    task.depth[env_ids] = task.noise(depth) if env.cfg.visual_noise else depth
+    bind_candidates(env, env_ids, candidate)

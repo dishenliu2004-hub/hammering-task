@@ -10,6 +10,22 @@ from scipy.spatial.transform import Rotation
 
 from generation.hammer_generate import sync_data
 from generation.impact_force import PeakImpactForce
+from generation.hammer_geometry import HEAD_CENTER_LOCAL, STRIKE_FACE_CENTER_LOCAL
+
+
+def compute_nominal_b_pose(target_pos, target_quat, target_frame, grip_center_local=(0., 0., 0.)):
+    """固定挥击 s=0 的锤体位姿；名义抓取中心取锤柄中心（刚体原点）。"""
+    impact = Rotation.from_quat(np.asarray(target_quat)[[1, 2, 3, 0]]) * Rotation.from_euler("y", np.pi)
+    axis = np.asarray(target_frame)[:, 1]
+    horizontal = np.cross(axis, [0., 0., 1.])
+    horizontal /= np.linalg.norm(horizontal)
+    raised = Rotation.from_rotvec(-np.pi / 3 * axis) * impact
+    impact_pos = np.asarray(target_pos) - impact.apply(STRIKE_FACE_CENTER_LOCAL)
+    position = (impact_pos + impact.apply(grip_center_local) - raised.apply(grip_center_local)
+                + np.array([0., 0., 0.30]) - 0.40 * horizontal)
+    return dict(hammer_pos=position, hammer_quat=raised.as_quat()[[3, 0, 1, 2]],
+                head_center=position + raised.apply(HEAD_CENTER_LOCAL),
+                face_center=position + raised.apply(STRIKE_FACE_CENTER_LOCAL))
 
 
 def step_mocap(model, data, pos, quat, gripper_action, dt=0.02, viewer=None, on_step=None,
@@ -124,7 +140,8 @@ def hammer_strike(
     grip_offset = mount_rot.inv().apply(grip_center - mount.xpos)
     if hammer_head_center_offset is None:
         hammer_rot = to_rotation(data.body("hammer_Object").xquat)
-        hammer_head_center_offset = tip_offset - (mount_rot.inv() * hammer_rot).apply([0, 0, 0.04])
+        hammer_head_center_offset = tip_offset - (mount_rot.inv() * hammer_rot).apply(
+            STRIKE_FACE_CENTER_LOCAL - HEAD_CENTER_LOCAL)
     head_offset = np.asarray(hammer_head_center_offset, dtype=float)
 
     # 固定任务轴，水平正向为 horizontal_axis；左右分别对应负向与正向。

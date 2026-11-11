@@ -16,7 +16,7 @@ from rsl_rl.runners import DistillationRunner
 
 from .env_cfg import make_env_cfg
 from .mdp.curriculum import SGS_PARAMS
-from .rl_cfg import ppo_cfg, distill_cfg
+from .rl_cfg import ppo_cfg, distill_cfg, initialize_expanded_model
 
 
 class _TeacherSgsRunner(MjlabOnPolicyRunner):
@@ -31,17 +31,11 @@ class _TeacherSgsRunner(MjlabOnPolicyRunner):
 
 class _RewardLogVecEnvWrapper(RslRlVecEnvWrapper):
     def step(self, actions):
-        start_mode = self.unwrapped.hammer.start_mode.clone()
         obs, reward, done, extras = super().step(actions)
         # 直接记录加权评分，不按回合时长归一化。
         for name, term in self.cfg.rewards.items():
             extras["log"][f"Episode_Reward/{name}"] = extras["log"][f"Episode_Metrics/{name}"] * term.weight
         extras["log"]["Train/total_reward"] = reward.mean()
-        success = self.unwrapped.action_manager.get_term("grasp").last_task_success
-        for mode in (0, 1):
-            completed = (start_mode == mode) & done.bool()
-            if completed.any():
-                extras["log"][f"Train/task_success_start_mode_{mode}"] = success[completed].mean()
         return obs, reward, done, extras
 
 
@@ -70,7 +64,6 @@ def _enable_best_checkpoint(runner, stage, run_dir):
                 "Learning iteration " in line
                 or label.startswith("Episode_Reward/")
                 or label in ("Train/total_reward", "Total steps", "Iteration time")
-                or label.startswith("Train/task_success_start_mode_")
                 or (label.startswith("Mean ") and label.endswith(" loss"))
             ):
                 print(line)
@@ -87,9 +80,8 @@ def _enable_best_checkpoint(runner, stage, run_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=("teacher", "distill", "student"), required=True)
-    parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank.npz")
-    parser.add_argument("--strike-data-file", default="weight/hammer_rl/strike_reset_bank_256.npz")
-    parser.add_argument("--strike-start-prob", type=float, default=0.5)
+    parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank_ab_256.npz")
+    parser.add_argument("--b-pose-file", default="weight/hammer_rl/b_pose_bank_40.npz")
     parser.add_argument("--num-envs", type=int, default=128)
     parser.add_argument("--max-iterations", type=int, default=5000, help="本次追加的 update 数")
     parser.add_argument("--device", default="cuda:0")
@@ -100,7 +92,7 @@ def main():
         action="store_true",
         help="teacher续训时使用本次数据路径和当前课程配置，清空课程状态并保留模型和优化器",
     )
-    parser.add_argument("--init-from", type=Path, help="仅 student：蒸馏 checkpoint 初始化 actor")
+    parser.add_argument("--init-from", type=Path, help="PPO 权重初始化；可迁移旧 6D 同结构模型，不恢复优化器")
     parser.add_argument("--teacher-checkpoint", type=Path)
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
     parser.add_argument("--log-dir", type=Path)
@@ -116,14 +108,12 @@ def main():
             config["scene_sgs"] = SGS_PARAMS.copy()
             config["data_file"] = str(Path(args.data_file).resolve())
         args.data_file = config["data_file"]
-        args.strike_data_file = config["strike_data_file"]
-        args.strike_start_prob = config["strike_start_prob"]
+        args.b_pose_file = config["b_pose_file"]
     else:
         stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
         run_dir = args.log_dir or Path("weight/hammer_rl/runs") / args.stage / stamp
         config = dict(stage=args.stage, data_file=str(Path(args.data_file).resolve()),
-            strike_data_file=str(Path(args.strike_data_file).resolve()),
-            strike_start_prob=args.strike_start_prob,
+            b_pose_file=str(Path(args.b_pose_file).resolve()),
             hammer_head_extra_mass=args.hammer_head_extra_mass,
             seed=args.seed)
         if args.stage == "teacher":
@@ -132,7 +122,7 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     env_cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=args.stage,
-        strike_data_file=args.strike_data_file, strike_start_prob=args.strike_start_prob,
+        b_pose_file=args.b_pose_file,
         num_envs=args.num_envs, seed=args.seed)
     if args.stage == "teacher":
         env_cfg.curriculum["scene_sgs"].params = config["scene_sgs"]
@@ -158,9 +148,12 @@ def main():
             env.reset()
         elif args.stage == "distill":
             runner.load(str(args.teacher_checkpoint), map_location=args.device)
-        elif args.stage == "student":
+        elif args.init_from:
             checkpoint = torch.load(args.init_from, map_location=args.device, weights_only=False)
-            runner.alg.load({"actor_state_dict": checkpoint["student_state_dict"]}, {"actor": True}, strict=True)
+            actor_key = "student_state_dict" if "student_state_dict" in checkpoint else "actor_state_dict"
+            initialize_expanded_model(runner.alg.actor, checkpoint[actor_key])
+            if "critic_state_dict" in checkpoint:
+                initialize_expanded_model(runner.alg.critic, checkpoint["critic_state_dict"])
         _enable_best_checkpoint(runner, args.stage, run_dir)
         runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)
         checkpoint = run_dir / f"model_{runner.current_learning_iteration}.pt"

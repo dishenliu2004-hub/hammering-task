@@ -26,9 +26,8 @@ SCENE = Path(__file__).resolve().parents[1] / "assets/scenes/scene.xml"
 
 @dataclass(kw_only=True)
 class HammerEnvCfg(ManagerBasedRlEnvCfg):
-    data_file: str = "weight/hammer_rl/reset_bank.npz"
-    strike_data_file: str = "weight/hammer_rl/strike_reset_bank_256.npz"
-    strike_start_prob: float = 0.5
+    data_file: str = "weight/hammer_rl/reset_bank_ab_256.npz"
+    b_pose_file: str = "weight/hammer_rl/b_pose_bank_40.npz"
     stage: str = "teacher"  # teacher / distill / student
     split: str = "train"
 
@@ -61,8 +60,8 @@ def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
     spec.attach(source, prefix="", frame=spec.worldbody.add_frame())
 
 
-def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/reset_bank.npz",
-                 strike_data_file="weight/hammer_rl/strike_reset_bank_256.npz", strike_start_prob=0.5,
+def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/reset_bank_ab_256.npz",
+                 b_pose_file="weight/hammer_rl/b_pose_bank_40.npz",
                  stage="teacher", num_envs=128, split="train", seed=42,
                  training=True) -> HammerEnvCfg:
     # 使用总场景编译后的物理步长。
@@ -97,14 +96,15 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
     )
 
     # 三个阶段使用同一物理随机化分布；深度噪声仅用于蒸馏和学生。
-    randomize = True
+    #randomize = True
+    #只在蒸馏和学生模型训练的时候引入域随机化
+    randomize = stage in ("distill", "student")
     events = {}
     if randomize:
         events["physics"] = EventTermCfg(func=resets.randomize_physics, mode="reset")
     events["scene"] = EventTermCfg(func=resets.reset_scene, mode="reset")
 
-    cfg = HammerEnvCfg(data_file=str(data_file), strike_data_file=str(strike_data_file),
-        strike_start_prob=strike_start_prob if training and split == "train" else 0.0,
+    cfg = HammerEnvCfg(data_file=str(data_file), b_pose_file=str(b_pose_file),
         stage=stage, split=split, seed=seed,
         randomize_physics=randomize, visual_noise=stage in ("distill", "student"),
         scene=SceneCfg(num_envs=num_envs, sensors=sensors,
@@ -142,7 +142,10 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                         "impact_impulse", "task_success", "drop",
                         "translation_drift", "rotation_drift", "mean_force", "valid_strike",
                         "lift_height", "grasp_before_swing",
-                        "seat_closure", "seat_lift", "seat_before_swing")}},
+                        "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
+                        "b_position_error_before", "b_rotation_error_before", "b_face_center_error_before",
+                        "b_position_error", "b_rotation_error", "b_face_center_error",
+                        "b_rotation_adjustment", "b_alignment_success")}},
         # 仅教师训练启用逐场景 SGS。
         curriculum={"scene_sgs": CurriculumTermCfg(func=curriculum.SceneSgsCurriculum,
                                                    params=curriculum.SGS_PARAMS.copy())}

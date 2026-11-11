@@ -27,12 +27,12 @@ def main():
     args = parser.parse_args()
     checkpoint = args.checkpoint.resolve()
     config = json.loads((checkpoint.parent / "run_config.json").read_text())
-    data_file = args.data_file or Path(__file__).resolve().parents[1] / "weight/hammer_rl/reset_bank_256.npz"
+    data_file = args.data_file or Path(config["data_file"])
     output_dir = args.output_dir or checkpoint.parent / f"comparison_{checkpoint.stem}"
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluation = [
         sys.executable, "-m", "hammer_rl.evaluate",
-        "--split", "eval",
+        "--split", "eval", "--b-pose-file", config["b_pose_file"],
         "--episodes", str(args.episodes), "--num-envs", str(args.num_envs),
         "--seed", str(args.seed),
         "--device", args.device, "--headless",

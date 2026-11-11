@@ -79,30 +79,27 @@ def launch_viewer(model, data, simulation):
             time.sleep(max(0, 0.02 - (time.monotonic() - start)))
 
 
-def load_random_scene(hammer_head_extra_mass=0.0):
-    # 加载总场景及其挂接的夹爪、相机、支架、圆柱和锤子模型。
-    spec = mujoco.MjSpec.from_file(str(SCENE))
-    add_head_mass(spec, hammer_head_extra_mass)
-    model = spec.compile()
-
-    # 使用椭圆摩擦锥；MuJoCo Warp 不支持 noslip 求解器。
-    # 锤头 condim=6：接触可提供法向力、切向摩擦及扭转/滚动摩擦。
-    model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
-    model.geom("hammer_head").condim[0] = 6
-
-    # model 保存结构和参数；data 保存每一步的位置、速度、接触等动态状态。
-    # mj_forward 根据当前状态计算世界位姿等派生量，不推进仿真时间。
-    data = mujoco.MjData(model)
+def set_hammer_pose(model, data, position, quaternion):
+    """用根部参考位姿设置六关节锤子；只 forward，不推进时间。"""
+    hammer = model.body("hammer_Object")
+    joints = np.flatnonzero(model.jnt_bodyid == hammer.id)
+    data.qpos[model.jnt_qposadr[joints]] = 0
+    dofs = model.jnt_dofadr[joints]
+    data.qvel[dofs] = 0
+    data.qacc_warmstart[dofs] = 0
+    data.qfrc_applied[dofs] = 0
+    data.xfrc_applied[hammer.id] = 0
+    hammer.pos[:] = position
+    hammer.quat[:] = quaternion
+    mujoco.mj_setConst(model, data)
     mujoco.mj_forward(model, data)
 
-    # 创建随机数生成器，不指定种子，所以每次调用可能得到不同的摆放。
-    rng = np.random.default_rng()
+
+def sample_legacy_placement(rng, scene):
+    """教师 v1（8089d95）的四类支架局部位姿公式。"""
     # position 和 local_quat 均相对于 L 形支架坐标系；四元数采用 wxyz。
     # 支架局部 Z 向上、X 沿底板长边、Y 沿宽度，顶部高度为 0.37 米。
     local_quat = np.zeros(4)
-    # 等概率选择 0、1、2、3 四类初始摆放。
-    scene = rng.integers(4)
-
     if scene == 0:
         # 横躺：圆形敲击面朝下，沿底板长边随机偏转、平移。
         # yaw 在正负 12 度内采样；绕锤柄轴翻转 180 度后绕支架局部 Z 轴偏转。
@@ -159,6 +156,29 @@ def load_random_scene(hammer_head_extra_mass=0.0):
         # 底板顶面为0.12m；锤头削平面距锤体原点0.25722345m，留0.5mm间隙。
         position = np.array([rng.uniform(0.29, 0.33), rng.uniform(-0.02, 0.02),
                              0.12 + 0.25722345 + 0.0005])
+
+    return position, local_quat
+
+
+def load_random_scene(hammer_head_extra_mass=0.0):
+    # 加载总场景及其挂接的夹爪、相机、支架、圆柱和锤子模型。
+    spec = mujoco.MjSpec.from_file(str(SCENE))
+    add_head_mass(spec, hammer_head_extra_mass)
+    model = spec.compile()
+
+    # 使用椭圆摩擦锥；MuJoCo Warp 不支持 noslip 求解器。
+    # 锤头 condim=6：接触可提供法向力、切向摩擦及扭转/滚动摩擦。
+    model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+    model.geom("hammer_head").condim[0] = 6
+
+    # model 保存结构和参数；data 保存每一步的位置、速度、接触等动态状态。
+    # mj_forward 根据当前状态计算世界位姿等派生量，不推进仿真时间。
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    # 创建随机数生成器，不指定种子，所以每次调用可能得到不同的摆放。
+    rng = np.random.default_rng()
+    position, local_quat = sample_legacy_placement(rng, rng.integers(4))
 
     # 获取支架当前世界位姿；名称带有总场景 attach 设置的 support_ 前缀。
     support = data.body("support_L_support")

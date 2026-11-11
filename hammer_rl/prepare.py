@@ -1,4 +1,4 @@
-"""离线连续采样并沉降接纳稳定初态，缓存抓前深度与真实 AnyGrasp 候选。"""
+"""离线混合四类历史姿态与连续随机姿态，缓存稳定 A 初态及 AnyGrasp 候选。"""
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -13,7 +13,7 @@ from scipy.spatial.transform import Rotation
 
 from generation.enclosure import build_enclosure_geometry
 from generation.grasp_hammer import generate_grasps, candidate_to_mount
-from generation.hammer_generate import create_simulation, sync_data, SCENE
+from generation.hammer_generate import create_simulation, sync_data, sample_legacy_placement, SCENE
 from generation.hammer_inertia import add_head_mass
 
 STATE_FIELDS = ("qpos", "qvel", "act", "ctrl", "mocap_pos", "mocap_quat", "eq_active",
@@ -22,7 +22,7 @@ STATE_FIELDS = ("qpos", "qvel", "act", "ctrl", "mocap_pos", "mocap_quat", "eq_ac
 WORKSPACE = ((0.14, -0.16, 0.11), (0.46, 0.41, 0.72))
 
 
-def create_scene(rng, hammer_head_extra_mass=0.0):
+def create_scene(rng, hammer_head_extra_mass=0.0, placement=4):
     spec = mujoco.MjSpec.from_file(str(SCENE))
     add_head_mass(spec, hammer_head_extra_mass)
     handle = spec.geom("hammer_handle")
@@ -42,32 +42,34 @@ def create_scene(rng, hammer_head_extra_mass=0.0):
     while True:
         mujoco.mj_resetData(model, data)
         mujoco.mj_forward(model, data)
-        # 连续采样支架局部位姿；Rz(yaw) @ Ry(-tilt) @ Rx(roll)，局部 +X 为柄轴。
-        position = np.array([rng.uniform(0.12, 0.42), rng.uniform(-0.10, 0.10), 0.0])
-        yaw, tilt, roll = (rng.uniform(-np.pi, np.pi), rng.uniform(-np.pi / 2, np.pi / 2),
-                           rng.uniform(-np.pi, np.pi))
-        rotation = Rotation.from_euler("ZYX", [yaw, -tilt, roll])
-        local_quat = rotation.as_quat()[[3, 0, 1, 2]]
-        # 用编译模型的 capsule 端点/半径与 mesh 顶点求投影，预留 1 mm 接触间隙。
-        # 挡板投影重叠时提高初始高度；不裁剪 x/y，也不要求锤体完全落在底板内。
-        for geom in hammer_geoms:
-            geom_rotation = Rotation.from_quat(geom.quat[[1, 2, 3, 0]])
-            if geom.type[0] == mujoco.mjtGeom.mjGEOM_CAPSULE:
-                endpoints = geom.pos + geom_rotation.apply(
-                    np.array([[0.0, 0.0, -geom.size[1]], [0.0, 0.0, geom.size[1]]]))
-                points = rotation.apply(endpoints)
-                lower, upper = points.min(axis=0) - geom.size[0], points.max(axis=0) + geom.size[0]
-            else:
-                mesh = geom.dataid[0]
-                start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
-                points = rotation.apply(geom.pos + geom_rotation.apply(model.mesh_vert[start:start + count]))
-                lower, upper = points.min(axis=0), points.max(axis=0)
-            position[2] = max(position[2], floor.pos[2] + floor.size[2] - lower[2] + 0.001)
-            if np.all(position[:2] + upper[:2] > wall_min[:2]) and np.all(
-                position[:2] + lower[:2] < wall_max[:2]
-            ):
-                position[2] = max(position[2], wall_max[2] - lower[2] + 0.001)
-
+        if placement < 4:
+            position, local_quat = sample_legacy_placement(rng, placement)
+        else:
+            # 连续采样支架局部位姿；Rz(yaw) @ Ry(-tilt) @ Rx(roll)，局部 +X 为柄轴。
+            position = np.array([rng.uniform(0.12, 0.42), rng.uniform(-0.10, 0.10), 0.0])
+            yaw, tilt, roll = (rng.uniform(-np.pi, np.pi), rng.uniform(-np.pi / 2, np.pi / 2),
+                               rng.uniform(-np.pi, np.pi))
+            rotation = Rotation.from_euler("ZYX", [yaw, -tilt, roll])
+            local_quat = rotation.as_quat()[[3, 0, 1, 2]]
+            # 用编译模型的 capsule 端点/半径与 mesh 顶点求投影，预留 1 mm 接触间隙。
+            # 挡板投影重叠时提高初始高度；不裁剪 x/y，也不要求锤体完全落在底板内。
+            for geom in hammer_geoms:
+                geom_rotation = Rotation.from_quat(geom.quat[[1, 2, 3, 0]])
+                if geom.type[0] == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                    endpoints = geom.pos + geom_rotation.apply(
+                        np.array([[0.0, 0.0, -geom.size[1]], [0.0, 0.0, geom.size[1]]]))
+                    points = rotation.apply(endpoints)
+                    lower, upper = points.min(axis=0) - geom.size[0], points.max(axis=0) + geom.size[0]
+                else:
+                    mesh = geom.dataid[0]
+                    start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+                    points = rotation.apply(geom.pos + geom_rotation.apply(model.mesh_vert[start:start + count]))
+                    lower, upper = points.min(axis=0), points.max(axis=0)
+                position[2] = max(position[2], floor.pos[2] + floor.size[2] - lower[2] + 0.001)
+                if np.all(position[:2] + upper[:2] > wall_min[:2]) and np.all(
+                    position[:2] + lower[:2] < wall_max[:2]
+                ):
+                    position[2] = max(position[2], wall_max[2] - lower[2] + 0.001)
         support = data.body("support_L_support")
         # 参考位姿仍由支架局部转换到世界；沉降后的实际位姿保存在 data。
         hammer.pos[:] = support.xpos + support.xmat.reshape(3, 3) @ position
@@ -103,11 +105,11 @@ def create_scene(rng, hammer_head_extra_mass=0.0):
         del simulation
 
 
-def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0):
+def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0, placement=4):
     from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
 
     while True:
-        model, data, simulation = create_scene(rng, hammer_head_extra_mass)
+        model, data, simulation = create_scene(rng, hammer_head_extra_mass, placement)
         camera = CameraRGBPointCloud(model)
         camera.renderer.update_scene(data, camera=camera.camera)
         camera.renderer.enable_segmentation_rendering()
@@ -131,22 +133,29 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0):
                   target_quat=data.body("cylinder_sensing_endcap").xquat.copy(),
                   support_pos=data.body("support_L_support").xpos.copy(),
                   support_quat=data.body("support_L_support").xquat.copy())
+    sample["source_type"] = np.int64(placement)
+    captured, candidates = capture_candidates(model, data, camera, sample, candidates_per_scene, WORKSPACE)
+    sample.update(captured)
+    del simulation
+    return sample, candidates
+
+
+def capture_candidates(model, data, camera, sample, count, workspace):
+    """A/B 共用原相机、SDK、NMS、覆盖采样和一次 30 mm 转换。"""
     try:
         frame = camera.capture(data)
         depth = camera.renderer.render()[::8, ::8].copy()
         depth[(depth <= 0) | (depth >= camera.far)] = 0
-        sample.update(depth=depth[None].astype(np.float32),
-                      camera_pos=frame["camera_pos"],
-                      camera_quat=Rotation.from_matrix(frame["camera_rot"]).as_quat()[[3, 0, 1, 2]],
-                      intrinsics=np.array([camera.focal / 8, camera.focal / 8,
-                                           (camera.width - 1) / 16, (camera.height - 1) / 16]))
-        grasps, _ = generate_grasps(model, data, frame, workspace_bounds=WORKSPACE,
-                                   convert_first=False)
+        captured = dict(depth=depth[None].astype(np.float32),
+                        camera_pos=frame["camera_pos"],
+                        camera_quat=Rotation.from_matrix(frame["camera_rot"]).as_quat()[[3, 0, 1, 2]],
+                        intrinsics=np.array([camera.focal / 8, camera.focal / 8,
+                                             (camera.width - 1) / 16, (camera.height - 1) / 16]))
+        grasps, _ = generate_grasps(model, data, frame, full_scene=False,
+                                   workspace_bounds=workspace, convert_first=False)
     finally:
         camera.close()
-    candidates = _prepare_candidates(grasps, sample, candidates_per_scene)
-    del simulation
-    return sample, candidates
+    return captured, _prepare_candidates(grasps, sample, min(count, 32))
 
 
 def _select_grasps(grasps, count):
@@ -176,31 +185,62 @@ def _prepare_candidates(grasps, sample, candidates_per_scene):
             local_pos=object_rot.inv().apply(pose["mount_pos"] - sample["hammer_pos"]),
             local_quat=(object_rot.inv() * rotation).as_quat()[[3, 0, 1, 2]],
             open_ctrl=pose["gripper_open_ctrl"],
+            mount_pos=pose["mount_pos"], mount_quat=pose["mount_quat"],
             **{name: grasps[name][i] for name in grasps}))
     return candidates
 
 
-def _prepare_scene_task(index, seed, candidates_per_scene, hammer_head_extra_mass):
+def _prepare_scene_task(index, seed, candidates_per_scene, hammer_head_extra_mass, placements):
     rng = np.random.default_rng(np.random.SeedSequence([seed, index]))
     try:
         return prepare_scene(rng, min(candidates_per_scene, 32),
-                             hammer_head_extra_mass)
+                             hammer_head_extra_mass, int(placements[index]))
     except Exception as error:
         raise RuntimeError(f"准备场景失败：scene={index}, seed={seed}\n{error}") from error
 
 
+def stratified_split(sources, seed):
+    rng = np.random.default_rng(seed)
+    split = np.zeros(len(sources), dtype=np.int64)
+    for source in np.unique(sources):
+        indices = rng.permutation(np.flatnonzero(sources == source))
+        split[indices[:round(len(indices) * 0.2)]] = 1
+    return split
+
+
+def bank_arrays(scenes, candidates, offsets):
+    arrays = {key: np.stack([sample[key] for sample in scenes]) for key in scenes[0]}
+    arrays.update({key: np.stack([sample[key] for sample in candidates]) for key in candidates[0]})
+    arrays["offsets"] = np.asarray(offsets, dtype=np.int64)
+    return arrays
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default="weight/hammer_rl/reset_bank.npz")
+    parser.add_argument("--output", help="输出路径，默认按普通/测试模式选择")
+    parser.add_argument("--test-set", action="store_true",
+                        help="独立生成 128 个测试场景，忽略三个场景数量参数，不再划分")
     parser.add_argument("--num-scenes", type=int, default=256)
+    parser.add_argument("--legacy-per-placement", type=int, default=45)
+    parser.add_argument("--random-scenes", type=int, default=76)
     parser.add_argument("--candidates-per-scene", type=int, default=32)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, help="随机种子，普通模式默认 42，测试模式默认 43")
     parser.add_argument("--workers", type=int, default=1, help="场景生成进程数（默认串行）")
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
     args = parser.parse_args()
+    if args.seed is None:
+        args.seed = 43 if args.test_set else 42
+    if args.output is None:
+        args.output = ("weight/hammer_rl/test_bank_ab_128.npz" if args.test_set
+                       else "weight/hammer_rl/reset_bank_ab_256.npz")
+    if args.test_set:
+        args.num_scenes = 128
+        placements = np.repeat(np.arange(5), [23, 23, 22, 22, 38])
+    else:
+        placements = np.repeat(np.arange(5), [args.legacy_per_placement] * 4 + [args.random_scenes])
     task = partial(_prepare_scene_task, seed=args.seed,
                    candidates_per_scene=args.candidates_per_scene,
-                   hammer_head_extra_mass=args.hammer_head_extra_mass)
+                   hammer_head_extra_mass=args.hammer_head_extra_mass, placements=placements)
     scenes, candidates, offsets = [], [], [0]
     with (ProcessPoolExecutor(max_workers=args.workers, mp_context=get_context("spawn"))
           if args.workers > 1 else nullcontext()) as executor:
@@ -211,13 +251,9 @@ def main():
             candidates.extend(seeds)
             offsets.append(len(candidates))
             print(f"scene {index}: candidates={len(seeds)}", flush=True)
-    arrays = {key: np.stack([sample[key] for sample in scenes]) for key in scenes[0]}
-    arrays.update({key: np.stack([sample[key] for sample in candidates]) for key in candidates[0]})
-    # 用同一 seed 置乱全部稳定场景；同一场景的候选共享 train/eval 划分。
-    split = np.zeros(args.num_scenes, dtype=np.int64)
-    indices = np.random.default_rng(args.seed).permutation(args.num_scenes)
-    split[indices[:round(args.num_scenes * 0.2)]] = 1
-    arrays.update(offsets=np.array(offsets), split=split,
+    arrays = bank_arrays(scenes, candidates, offsets)
+    arrays.update(split=(np.ones(args.num_scenes, dtype=np.int64) if args.test_set
+                         else stratified_split(placements, args.seed)),
                   hammer_head_extra_mass=np.array(args.hammer_head_extra_mass))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

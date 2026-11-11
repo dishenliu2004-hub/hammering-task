@@ -1,4 +1,4 @@
-"""原生 actor/critic 加载、候选评分与现有 6D 残差合成。"""
+"""原生 9D actor/critic 加载、候选评分与 A 抓取、B 调姿动作输出。"""
 
 import json
 from pathlib import Path
@@ -18,8 +18,8 @@ def load_models(checkpoint, device="cuda:0", *, with_critic=True):
     saved = json.loads((checkpoint.parent / "run_config.json").read_text())
     weights = torch.load(checkpoint, map_location=device, weights_only=False)
     cfg = saved["rl"]
-    obs = TensorDict({"privileged": torch.zeros(1, 88, device=device),
-        "public_seed": torch.zeros(1, 51, device=device),
+    obs = TensorDict({"privileged": torch.zeros(1, 94, device=device),
+        "public_seed": torch.zeros(1, 57, device=device),
         "depth": torch.zeros(1, 1, 120, 160, device=device)}, batch_size=[1])
 
     def build(model_cfg, groups, name, output_dim):
@@ -33,7 +33,7 @@ def load_models(checkpoint, device="cuda:0", *, with_critic=True):
     distill = saved["stage"] == "distill"
     actor_cfg = cfg["student"] if distill else cfg["actor"]
     groups = {"actor": cfg["obs_groups"]["student"]} if distill else cfg["obs_groups"]
-    actor = build(actor_cfg, groups, "actor", 6)
+    actor = build(actor_cfg, groups, "actor", 9)
     actor.load_state_dict(weights["student_state_dict" if distill else "actor_state_dict"])
     critic = None
     if with_critic:
@@ -50,7 +50,7 @@ def select_and_refine(actor, critic, observations, offsets, action_cfg):
                          for start, end in zip(offsets[:-1], offsets[1:])])
     public = observations["public_seed"][index]
     action = actor(observations[index])
-    pos, quat, pregrasp = refine_pose(public[:, :3], public[:, 3:7], action, action_cfg)
+    pos, quat, pregrasp = refine_pose(public[:, :3], public[:, 3:7], action[:, :6], action_cfg)
     return dict(index=index, candidate_index=index - offsets[:-1], scores=scores,
         score=scores[index], action=action, mount_pos=pos, mount_quat=quat,
         pregrasp_pos=pregrasp, width=public[:, 7], gripper_open_ctrl=public[:, 8])
@@ -91,7 +91,8 @@ def select_grasp(actor, critic, depth, scene, grasps):
               ("finger_pos", "finger_vel", "camera_pos", "camera_quat", "intrinsics",
                "target_pos", "target_quat")}
     public = public_observation(seed_pos, seed_quat, tensor(grasps["widths"]), open_ctrl, **fields)
-    public = torch.cat((public, public.new_zeros((count, 1))), dim=-1)
+    b_target = torch.cat((tensor(scene["b_target_pos"]), tensor(scene["b_target_quat"])))
+    public = torch.cat((public, b_target.expand(count, -1)), dim=-1)
     observations = TensorDict({"public_seed": public,
         "depth": tensor(depth).unsqueeze(0).expand(count, -1, -1, -1)}, batch_size=[count])
     return select_and_refine(actor, critic, observations,

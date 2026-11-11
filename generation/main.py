@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from generation.grasp_hammer import generate_grasps
 from generation.hammer_generate import load_random_scene
 from generation.knock_path import hammer_strike, move_to
+from generation.hammer_geometry import STRIKE_FACE_CENTER_LOCAL
 from visualization.anygrasp_grasp_visualization import show_grasps
 from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
 from visualization.full_scene_pointcloud import FullScenePointCloud
@@ -84,7 +85,7 @@ def main():
             mount_body, hammer_body = data.body("gripper_base_link"), data.body("hammer_Object")
             actual_mount_rot = Rotation.from_matrix(mount_body.xmat.reshape(3, 3))
             actual_hammer_rot = Rotation.from_matrix(hammer_body.xmat.reshape(3, 3))
-            face_pos = hammer_body.xpos + actual_hammer_rot.apply([-0.24, 0, 0.04])
+            face_pos = hammer_body.xpos + actual_hammer_rot.apply(STRIKE_FACE_CENTER_LOCAL)
             tip_offset = actual_mount_rot.inv().apply(face_pos - mount_body.xpos)
             relative_rot = actual_mount_rot.inv() * actual_hammer_rot
             target_site = data.site("cylinder_endface_force_frame")

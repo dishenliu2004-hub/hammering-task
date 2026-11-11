@@ -87,7 +87,7 @@ def main():
     saved = json.loads((args.checkpoint.parent / "run_config.json").read_text())
     stage = saved["stage"]
     cfg = make_env_cfg(saved["hammer_head_extra_mass"],
-        data_file=args.data_file or saved["data_file"], stage=stage,
+        data_file=args.data_file or saved["data_file"], b_pose_file=saved["b_pose_file"], stage=stage,
         num_envs=args.num_envs, split=args.split, seed=args.seed, training=False)
     cfg.randomize_physics = False
     cfg.events.pop("physics", None)

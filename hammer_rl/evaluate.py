@@ -19,7 +19,7 @@ from .inference import load_models, select_candidates
 
 
 def candidate_batches(env, pairs, episodes):
-    """显式绑定 A 场景/候选，供评估和离线抓持快照采集共用。"""
+    """显式绑定 A 场景/候选，逐批评估。"""
     for first in range(0, episodes, env.num_envs):
         selected = torch.tensor([pairs[i % len(pairs)]
             for i in range(first, first + env.num_envs)], device=env.device)
@@ -30,7 +30,8 @@ def candidate_batches(env, pairs, episodes):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank.npz")
+    parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank_ab_256.npz")
+    parser.add_argument("--b-pose-file")
     parser.add_argument("--split", choices=("train", "eval"), default="eval")
     parser.add_argument("--policy", choices=("zero", "trained"), default="zero")
     parser.add_argument("--selection", choices=("all", "sdk", "learned"), default="all")
@@ -69,8 +70,11 @@ def main():
         saved = json.loads((args.checkpoint.parent / "run_config.json").read_text())
         stage = saved["stage"]
         args.hammer_head_extra_mass = saved["hammer_head_extra_mass"]
+        args.b_pose_file = args.b_pose_file or saved["b_pose_file"]
+    args.b_pose_file = args.b_pose_file or "weight/hammer_rl/b_pose_bank_40.npz"
     count = 1 if args.viewer else min(args.num_envs, args.episodes)
     cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=stage,
+        b_pose_file=args.b_pose_file,
         num_envs=count, split=args.split, seed=args.seed, training=False)
     # 对照默认使用相同名义物理参数；--noise 同时用于 zero/teacher/student。
     cfg.randomize_physics = False
@@ -118,7 +122,7 @@ def main():
                         action = result["action"]
                         selected = list(zip(scene.tolist(), result["candidate_id"].tolist()))
                     else:
-                        action = (torch.zeros((count, 6), device=env.device) if policy is None else
+                        action = (torch.zeros((count, env.action_manager.total_action_dim), device=env.device) if policy is None else
                                   policy(wrapper.get_observations()))
                     if viewer is not None:
                         sync_data(env, data)
@@ -126,6 +130,7 @@ def main():
                     term = env.action_manager.get_term("grasp")
                     callback = term.on_physics_step
                     captured = {}
+                    b_pose_ids = env.hammer.b_pose_id.clone()
                     def capture(term):
                         if callback is not None:
                             callback(term)
@@ -135,7 +140,7 @@ def main():
                     _, reward, done, _ = wrapper.step(action)
                     term.on_physics_step = callback
                 for i in range(min(count, args.episodes - first)):
-                    rows.append(dict(scene_id=selected[i][0], candidate_id=selected[i][1],
+                    rows.append(dict(scene_id=selected[i][0], candidate_id=selected[i][1], b_pose_id=int(b_pose_ids[i]),
                         reward=float(reward[i]), **{key: float(value[i]) for key, value in captured.items()}))
                     if args.selection == "learned":
                         rows[-1]["predicted_score"] = float(result["score"][i])

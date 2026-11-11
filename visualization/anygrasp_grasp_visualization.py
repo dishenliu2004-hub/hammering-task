@@ -7,7 +7,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 import numpy as np
 
 
-def show_grasps(frame, grasps, top_k=50):
+def show_grasps(frame, grasps, top_k=32):
     indices = np.argsort(-grasps["scores"])[:top_k]
     scores = grasps["scores"][indices]
     cmap = LinearSegmentedColormap.from_list("grasp_score", ["blue", "purple", "red"], N=257)
