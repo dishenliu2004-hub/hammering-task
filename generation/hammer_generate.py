@@ -9,6 +9,7 @@ import numpy as np
 import mujoco_warp
 import torch
 from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
+from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from generation.hammer_inertia import add_head_mass
@@ -16,6 +17,29 @@ from generation.hammer_inertia import add_head_mass
 
 # 从当前文件定位项目根目录，使场景路径不依赖终端的工作目录。
 SCENE = Path(__file__).resolve().parents[1] / "assets" / "scenes" / "scene.xml"
+STABILITY_DURATION = 30.0
+STABILITY_INTERVAL = 0.02
+STABILITY_POSITION = 0.003
+STABILITY_ROTATION_DEG = 2.0
+
+
+def support_contacts(sim):
+    """读取 GPU 当前有效的锤子与支架约束接触，支持单场景和批量仿真。"""
+    contact = sim.wp_data.contact
+    count = int(sim.wp_data.nacon.numpy()[0])
+    geoms = contact.geom.numpy()[:count]
+    worlds = contact.worldid.numpy()[:count]
+    active = (contact.efc_address.numpy()[:count] >= 0).any(axis=1)
+    model = sim.mj_model
+    body = model.body("hammer_Object").id
+    hammer_geoms = np.flatnonzero(model.geom_bodyid == body)
+    support_geoms = [model.geom(f"support_L_support_{leg}_leg").id
+                     for leg in ("short", "long")]
+    match = ((np.isin(geoms[:, 0], hammer_geoms) & np.isin(geoms[:, 1], support_geoms))
+             | (np.isin(geoms[:, 1], hammer_geoms) & np.isin(geoms[:, 0], support_geoms)))
+    found = np.zeros(sim.num_envs, dtype=bool)
+    found[worlds[active & match]] = True
+    return found
 
 
 def write_data(simulation, data):
@@ -79,85 +103,108 @@ def launch_viewer(model, data, simulation):
             time.sleep(max(0, 0.02 - (time.monotonic() - start)))
 
 
-def set_hammer_pose(model, data, position, quaternion):
-    """用根部参考位姿设置六关节锤子；只 forward，不推进时间。"""
-    hammer = model.body("hammer_Object")
-    joints = np.flatnonzero(model.jnt_bodyid == hammer.id)
-    data.qpos[model.jnt_qposadr[joints]] = 0
-    dofs = model.jnt_dofadr[joints]
-    data.qvel[dofs] = 0
-    data.qacc_warmstart[dofs] = 0
-    data.qfrc_applied[dofs] = 0
-    data.xfrc_applied[hammer.id] = 0
-    hammer.pos[:] = position
-    hammer.quat[:] = quaternion
-    mujoco.mj_setConst(model, data)
-    mujoco.mj_forward(model, data)
+def sample_legacy_placement(rng, scene, *, model=None, expanded=False):
+    """教师 v1 接触公式；可按实际锤柄尺寸和底板可行域扩展采样。"""
+    while True:
+        # position 和 local_quat 均相对于 L 形支架坐标系；四元数采用 wxyz。
+        # 支架局部 Z 向上、X 沿底板长边、Y 沿宽度，顶部高度为 0.37 米。
+        local_quat = np.zeros(4)
+        radius, half_length = ((0.025, 0.05) if model is None
+                               else model.geom("hammer_handle").size[:2])
+        if scene == 0:
+            # 横躺：圆形敲击面朝下，沿底板长边随机偏转、平移。
+            # yaw 在正负 12 度内采样；绕锤柄轴翻转 180 度后绕支架局部 Z 轴偏转。
+            yaw = rng.uniform(-np.pi, np.pi) if expanded else rng.uniform(-np.pi / 15, np.pi / 15)
+            mujoco.mju_euler2Quat(local_quat, np.array([yaw, np.pi, 0.]), "zxy")
+            # 在底板上小范围平移；固定高度用于设置接近接触面的初始状态。
+            position = np.array([rng.uniform(0.29, 0.33), rng.uniform(-0.02, 0.02), 0.1605])
 
+        elif scene == 1:
+            # 斜靠：锤头落在底板上，锤柄接触板面或顶部边缘。
+            # theta 为倾斜角，范围 30～90 度；s、c 简写其正弦和余弦。
+            theta = rng.uniform(np.pi / 6, np.pi / 2)
+            s, c = np.sin(theta), np.cos(theta)
+            # r 为实际锤柄半径加 0.0005 米接触间隙。
+            r = radius + 0.0005
+            # 0.1405 是由底板高度和锤头半径确定的基准高度；
+            # 0.24*sin(theta) 补偿锤头相对锤体原点的高度差。
+            z = 0.1405 + 0.24 * s
+            # h 表示锤柄端部圆弧中心相对支架顶部的高度差。
+            # t 是辅助轴向距离，与实际锤柄圆柱段半长比较以区分接触形态。
+            h = z + half_length * s - 0.37
+            t = (r * c + 0.37 - z) / s
+            if h <= 0:
+                # 端部圆弧中心未高于顶部，按与竖直板内侧接触计算横向位置。
+                x = 0.02 + half_length * c + r
+            elif t > half_length:
+                # 端部圆弧靠在顶部边缘，用圆的几何关系求水平间距。
+                x = 0.02 + half_length * c + np.sqrt(r * r - h * h)
+            else:
+                # 接触位置涉及倾斜柄身，按柄身与顶部边缘相切求位置。
+                x = 0.02 + (r + c * (0.37 - z)) / s
+            # Y 方向随机移动；yzx 指定欧拉角序列，结果存入 wxyz 四元数。
+            position = np.array([x, rng.uniform(-0.05, 0.05), z])
+            mujoco.mju_euler2Quat(local_quat, np.array([theta, np.pi, np.pi / 2]), "yzx")
 
-def sample_legacy_placement(rng, scene):
-    """教师 v1（8089d95）的四类支架局部位姿公式。"""
-    # position 和 local_quat 均相对于 L 形支架坐标系；四元数采用 wxyz。
-    # 支架局部 Z 向上、X 沿底板长边、Y 沿宽度，顶部高度为 0.37 米。
-    local_quat = np.zeros(4)
-    if scene == 0:
-        # 横躺：圆形敲击面朝下，沿底板长边随机偏转、平移。
-        # yaw 在正负 12 度内采样；绕锤柄轴翻转 180 度后绕支架局部 Z 轴偏转。
-        yaw = rng.uniform(-np.pi / 15, np.pi / 15)
-        mujoco.mju_euler2Quat(local_quat, np.array([yaw, np.pi, 0.]), "zxy")
-        # 在底板上小范围平移；固定高度用于设置接近接触面的初始状态。
-        position = np.array([rng.uniform(0.29, 0.33), rng.uniform(-0.02, 0.02), 0.1605])
+        elif scene == 2:
+            # 斜靠：锤柄落在底板上，锤头接触板面或顶部边缘。
+            # 上限限制锤头相对顶部的高度差不超过接触半径，保证圆弧公式有效。
+            theta_max = np.arcsin((0.27 - radius) / (0.24 + half_length))
+            # 实际模型取 v1 的顶部支撑解：底板托住锤柄，挡板顶面托住锤头。
+            # 板面侧靠的连续角度存在慢滑，不能作为 30 秒稳态缓存。
+            theta = rng.uniform(np.pi / 6, theta_max) if model is None else theta_max
+            s, c = np.sin(theta), np.cos(theta)
+            # r 为锤头半径 0.020 米加 0.0005 米接触间隙。
+            r = 0.0205
+            # 按锤柄落在底板上的几何关系设置锤体原点高度。
+            z = 0.12 + radius + 0.0005 + half_length * s
+            # 锤头中心相对顶部的高度差；未超过顶部时靠板面，否则靠顶部边缘。
+            h = z + 0.24 * s - 0.37
+            x = (0.02 + 0.24 * c + (r if h <= 0 else np.sqrt(r * r - h * h))
+                 if model is None else model.geom("support_L_support_long_leg").pos[0] + 0.24 * c)
+            position = np.array([x, rng.uniform(-0.05, 0.05), z])
+            mujoco.mju_euler2Quat(local_quat, np.array([theta, 0., np.pi / 2]), "yzx")
 
-    elif scene == 1:
-        # 斜靠：锤头落在底板上，锤柄接触板面或顶部边缘。
-        # theta 为倾斜角，范围 30～90 度；s、c 简写其正弦和余弦。
-        theta = rng.uniform(np.pi / 6, np.pi / 2)
-        s, c = np.sin(theta), np.cos(theta)
-        # r 为锤柄半径 0.025 米加 0.0005 米接触间隙。
-        r = 0.0255
-        # 0.1405 是由底板高度和锤头半径确定的基准高度；
-        # 0.24*sin(theta) 补偿锤头相对锤体原点的高度差。
-        z = 0.1405 + 0.24 * s
-        # h 表示锤柄端部圆弧中心相对支架顶部的高度差。
-        # t 是辅助轴向距离，与锤柄圆柱段半长 0.05 米比较以区分接触形态。
-        h = z + 0.05 * s - 0.37
-        t = (r * c + 0.37 - z) / s
-        if h <= 0:
-            # 端部圆弧中心未高于顶部，按与竖直板内侧接触计算横向位置。
-            x = 0.02 + 0.05 * c + r
-        elif t > 0.05:
-            # 端部圆弧靠在顶部边缘，用圆的几何关系求水平间距。
-            x = 0.02 + 0.05 * c + np.sqrt(r * r - h * h)
         else:
-            # 接触位置涉及倾斜柄身，按柄身与顶部边缘相切求位置。
-            x = 0.02 + (r + c * (0.37 - z)) / s
-        # Y 方向随机移动；yzx 指定欧拉角序列，结果存入 wxyz 四元数。
-        position = np.array([x, rng.uniform(-0.05, 0.05), z])
-        mujoco.mju_euler2Quat(local_quat, np.array([theta, np.pi, np.pi / 2]), "yzx")
+            # 倒立：锤柄朝上，锤头削出的 2cm×6cm 平面朝下并接触底板。
+            mujoco.mju_axisAngle2Quat(local_quat, np.array([0., 1., 0.]), -np.pi / 2)
+            # 底板顶面为0.12m；锤头削平面距锤体原点0.25722345m，留0.5mm间隙。
+            position = np.array([rng.uniform(0.29, 0.33), rng.uniform(-0.02, 0.02),
+                                 0.12 + 0.25722345 + 0.0005])
+            if expanded:
+                yaw_quat = np.zeros(4)
+                mujoco.mju_axisAngle2Quat(yaw_quat, np.array([0., 0., 1.]), rng.uniform(-np.pi, np.pi))
+                mujoco.mju_mulQuat(local_quat, yaw_quat, local_quat.copy())
 
-    elif scene == 2:
-        # 斜靠：锤柄落在底板上，锤头接触板面或顶部边缘。
-        # 上限限制锤头相对顶部的高度差不超过接触半径，保证圆弧公式有效。
-        theta = rng.uniform(np.pi / 6, np.arcsin(0.245 / 0.29))
-        s, c = np.sin(theta), np.cos(theta)
-        # r 为锤头半径 0.020 米加 0.0005 米接触间隙。
-        r = 0.0205
-        # 按锤柄落在底板上的几何关系设置锤体原点高度。
-        z = 0.1455 + 0.05 * s
-        # 锤头中心相对顶部的高度差；未超过顶部时靠板面，否则靠顶部边缘。
-        h = z + 0.24 * s - 0.37
-        x = 0.02 + 0.24 * c + (r if h <= 0 else np.sqrt(r * r - h * h))
-        position = np.array([x, rng.uniform(-0.05, 0.05), z])
-        mujoco.mju_euler2Quat(local_quat, np.array([theta, 0., np.pi / 2]), "yzx")
+        if expanded:
+            # 沿用原连续分支的 capsule/mesh 投影，求底板内的可行平移区间。
+            rotation = Rotation.from_quat(local_quat[[1, 2, 3, 0]])
+            lower, upper = np.full(3, np.inf), np.full(3, -np.inf)
+            for name in ("hammer_handle", "hammer_neck", "hammer_head"):
+                geom = model.geom(name)
+                geom_rotation = Rotation.from_quat(geom.quat[[1, 2, 3, 0]])
+                if geom.type[0] == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                    endpoints = geom.pos + geom_rotation.apply(
+                        np.array([[0., 0., -geom.size[1]], [0., 0., geom.size[1]]]))
+                    points = rotation.apply(endpoints)
+                    geom_lower, geom_upper = points.min(axis=0) - geom.size[0], points.max(axis=0) + geom.size[0]
+                else:
+                    mesh = geom.dataid[0]
+                    start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+                    points = rotation.apply(geom.pos + geom_rotation.apply(model.mesh_vert[start:start + count]))
+                    geom_lower, geom_upper = points.min(axis=0), points.max(axis=0)
+                lower, upper = np.minimum(lower, geom_lower), np.maximum(upper, geom_upper)
+            floor = model.geom("support_L_support_short_leg")
+            minimum = np.maximum([0.12, -0.10], floor.pos[:2] - floor.size[:2] - lower[:2])
+            maximum = np.minimum([0.42, 0.10], floor.pos[:2] + floor.size[:2] - upper[:2])
+            if scene == 2:
+                position[1] = rng.uniform(minimum[1], maximum[1])
+            elif np.all(minimum <= maximum):
+                position[:2] = rng.uniform(minimum, maximum)
+            else:
+                continue
 
-    else:
-        # 倒立：锤柄朝上，锤头削出的 2cm×6cm 平面朝下并接触底板。
-        mujoco.mju_axisAngle2Quat(local_quat, np.array([0., 1., 0.]), -np.pi / 2)
-        # 底板顶面为0.12m；锤头削平面距锤体原点0.25722345m，留0.5mm间隙。
-        position = np.array([rng.uniform(0.29, 0.33), rng.uniform(-0.02, 0.02),
-                             0.12 + 0.25722345 + 0.0005])
-
-    return position, local_quat
+        return position, local_quat
 
 
 def load_random_scene(hammer_head_extra_mass=0.0):

@@ -23,18 +23,9 @@ def initialize_task(env):
         bank = {key: torch.as_tensor(source[key], device=env.device,
                   dtype=torch.float32 if source[key].dtype.kind == "f" else None)
                 for key in source.files}
-    with np.load(env.cfg.b_pose_file) as source:
-        b_bank = {key: torch.as_tensor(source[key], device=env.device,
-                  dtype=torch.float32 if source[key].dtype.kind == "f" else None)
-                  for key in source.files}
     model = env.sim.mj_model
     ids = torch.arange(env.num_envs, device=env.device)
     task = SimpleNamespace(bank=bank, scene_id=ids * 0, candidate_id=ids * 0,
-        b_bank=b_bank, b_pose_id=ids * 0, b_selection=None,
-        b_scenes=(b_bank["split"] == (env.cfg.split == "eval")).nonzero().flatten(),
-        b_target_pos=torch.zeros((env.num_envs, 3), device=env.device),
-        b_target_quat=torch.zeros((env.num_envs, 4), device=env.device),
-        b_nominal_face=torch.zeros((env.num_envs, 3), device=env.device),
         seed_pos=torch.zeros((env.num_envs, 3), device=env.device),
         seed_quat=torch.zeros((env.num_envs, 4), device=env.device),
         open_ctrl=torch.zeros(env.num_envs, device=env.device),
@@ -42,8 +33,8 @@ def initialize_task(env):
         sampling_weights=((bank["split"] == (env.cfg.split == "eval")).float()),
         selection=None, hammer_id=model.body("hammer_Object").id,
         handle_geom_id=model.geom("hammer_handle").id,
-        narrow_driver_id=model.joint("gripper_hand_narrow1_joint").id,
-        wide_driver_id=model.joint("gripper_hand_wide1_joint").id,
+        spring_joint_ids=torch.tensor([model.joint(f"gripper_hand_{side}2_joint").id
+                                       for side in ("narrow", "wide")], device=env.device),
         mocap_id=int(model.body_mocapid[model.body("gripper_mount").id]),
         base_qadr=int(model.joint("gripper_base_free").qposadr[0]),
         base_vadr=int(model.joint("gripper_base_free").dofadr[0]),
@@ -51,7 +42,7 @@ def initialize_task(env):
         nominal_mass=torch.as_tensor(model.body_mass.copy(), dtype=torch.float32, device=env.device),
         nominal_inertia=torch.as_tensor(model.body_inertia.copy(), dtype=torch.float32, device=env.device),
         nominal_friction=torch.as_tensor(model.geom_friction.copy(), dtype=torch.float32, device=env.device),
-        nominal_joint_range=torch.as_tensor(model.jnt_range.copy(), dtype=torch.float32, device=env.device))
+        nominal_stiffness=torch.as_tensor(model.jnt_stiffness.copy(), dtype=torch.float32, device=env.device))
     task.finger_qadr = torch.tensor([int(model.joint(i).qposadr[0]) for i in range(model.njnt)
                                    if model.joint(i).name.startswith("gripper_hand_")], device=env.device)
     task.finger_vadr = torch.tensor([int(model.joint(i).dofadr[0]) for i in range(model.njnt)
@@ -60,11 +51,11 @@ def initialize_task(env):
                            min_depth=0.3, max_depth=3.0, filter_size=3).to(env.device)
     env.hammer = task
     # 构造 observation manager 时只需确定维度；第一次 reset 才写真实初始观测。
-    task.public = torch.zeros((env.num_envs, 57), device=env.device)
-    task.privileged = torch.zeros((env.num_envs, 94), device=env.device)
+    task.public = torch.zeros((env.num_envs, 50), device=env.device)
+    task.privileged = torch.zeros((env.num_envs, 87), device=env.device)
 
 
-@requires_model_fields("geom_friction", "body_mass", "body_inertia", "jnt_range", recompute=RecomputeLevel.set_const)
+@requires_model_fields("geom_friction", "body_mass", "body_inertia", "jnt_stiffness", recompute=RecomputeLevel.set_const)
 def randomize_physics(env, env_ids):
     task, model = env.hammer, env.sim.model
     count, body = len(env_ids), task.hammer_id
@@ -73,14 +64,9 @@ def randomize_physics(env, env_ids):
     model.body_inertia[env_ids, body] = task.nominal_inertia[body] * scale
     friction = torch.empty((count, 1, 1), device=env.device).uniform_(*env.cfg.friction_range)
     model.geom_friction[env_ids[:, None], task.finger_ids] = task.nominal_friction[task.finger_ids] * friction
-    open_delta = torch.empty(count, device=env.device).uniform_(0.0, 0.02)
-    close_delta = torch.empty(count, device=env.device).uniform_(0.0, 0.06)
-    narrow_base = task.nominal_joint_range[task.narrow_driver_id]
-    wide_base = task.nominal_joint_range[task.wide_driver_id]
-    model.jnt_range[env_ids, task.narrow_driver_id, 0] = narrow_base[0] - open_delta
-    model.jnt_range[env_ids, task.narrow_driver_id, 1] = narrow_base[1] - close_delta
-    model.jnt_range[env_ids, task.wide_driver_id, 0] = wide_base[0] + close_delta
-    model.jnt_range[env_ids, task.wide_driver_id, 1] = wide_base[1] + open_delta
+    spring_scale = torch.empty((count, 1), device=env.device).uniform_(*env.cfg.spring_stiffness_range)
+    model.jnt_stiffness[env_ids[:, None], task.spring_joint_ids] = (
+        task.nominal_stiffness[task.spring_joint_ids] * spring_scale)
 
 
 def public_observation(seed_pos, seed_quat, widths, open_ctrl, *, finger_pos, finger_vel,
@@ -134,9 +120,8 @@ def _initial_observations(env, env_ids, candidate, seed_pos, seed_quat,
         object_pos + quat_apply(object_quat, head_offset),
         bank["support_pos"][scene], bank["support_quat"][scene], support_size,
         mass[:, None], inertia, friction), dim=-1)
-    b_target = torch.cat((task.b_target_pos[env_ids], task.b_target_quat[env_ids]), dim=-1)
-    return TensorDict({"public_seed": torch.cat((public, b_target), dim=-1),
-                       "privileged": torch.cat((privileged, b_target), dim=-1),
+    return TensorDict({"public_seed": public,
+                       "privileged": privileged,
                        "depth": depth}, batch_size=[count])
 
 
@@ -168,12 +153,6 @@ def bind_candidates(env, env_ids, candidate):
 def reset_scene(env, env_ids):
     task, data, model = env.hammer, env.sim.data, env.sim.model
     bank, count = task.bank, len(env_ids)
-    b_pose = (task.b_scenes[torch.randint(len(task.b_scenes), (count,), device=env.device)]
-              if task.b_selection is None else task.b_selection[env_ids])
-    task.b_pose_id[env_ids] = b_pose
-    task.b_target_pos[env_ids] = task.b_bank["hammer_pos"][b_pose]
-    task.b_target_quat[env_ids] = task.b_bank["hammer_quat"][b_pose]
-    task.b_nominal_face[env_ids] = task.b_bank["nominal_face_center"][b_pose]
     if task.selection is None:
         scene = torch.multinomial(task.sampling_weights, count, replacement=True)
         start = bank["offsets"][scene]

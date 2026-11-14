@@ -8,27 +8,24 @@
 
 | 阶段 | 策略网络及输入 | 价值网络与优化目标 |
 | --- | --- | --- |
-| `teacher` | `MLPModel`：94 维 `privileged` → 隐藏层 `(512, 256, 128)` → 9 维高斯均值。 | critic：94 维 `privileged` → 隐藏层 `(256, 128, 64)` → 1 维价值；使用 PPO。 |
-| `distill` | 学生 `CNNModel` 使用 `depth` 和 57 维 `public_seed`，教师使用上述特权 MLP。 | 无 critic；固定教师，最小化学生与教师的 9 维确定性输出之间的 MSE。采集时执行学生采样动作。 |
+| `teacher` | `MLPModel`：87 维 `privileged` → 隐藏层 `(512, 256, 128)` → 6 维高斯均值。 | critic：87 维 `privileged` → 隐藏层 `(256, 128, 64)` → 1 维价值；使用 PPO。 |
+| `distill` | 学生 `CNNModel` 使用 `depth` 和 50 维 `public_seed`，教师使用上述特权 MLP。 | 无 critic；固定教师，最小化学生与教师的 6 维确定性输出之间的 MSE。采集时执行学生采样动作。 |
 | `student` | 与蒸馏学生相同的 `CNNModel`，从蒸馏 checkpoint 初始化 actor。 | 独立 `CNNModel` 使用相同深度和公开观测，输出 1 维价值、无动作分布；重新通过 PPO 微调。 |
 
-学生深度输入的单样本形状为 `(1, 120, 160)`，依次经过三层卷积：通道数 `(16, 32, 32)`、卷积核 `(5, 3, 3)`、步长 `(4, 2, 2)`，无 padding、无池化。特征形状依次为 `(16, 29, 39)`、`(32, 14, 19)`、`(32, 6, 9)`；展平为 1728 维，与 57 维公开观测拼接后进入隐藏层 `(256, 128, 64)`，输出 9 维高斯均值。
+学生深度输入的单样本形状为 `(1, 120, 160)`，依次经过三层卷积：通道数 `(16, 32, 32)`、卷积核 `(5, 3, 3)`、步长 `(4, 2, 2)`，无 padding、无池化。特征形状依次为 `(16, 29, 39)`、`(32, 14, 19)`、`(32, 6, 9)`；展平为 1728 维，与 50 维公开观测拼接后进入隐藏层 `(256, 128, 64)`，输出 6 维高斯均值。
 
 上述隐藏层和卷积层均使用 ELU。教师 actor、两个 PPO 阶段的 critic 和学生的一维公开观测均开启观测归一化；学生深度图直接进入 CNN，不通过该一维运行统计归一化器。当前没有 RNN 或跨尝试的隐藏状态。
 
 部署前通过 `python -m hammer_rl.calibrate` 冻结最终 actor，以训练候选执行确定性残差后的实际总奖励为标签，仅用 MSE 校准 critic。actor 参数和双方归一化统计保持不变。候选评分预测微调后的总奖励，选择时对场景内候选取 argmax；该阶段不改变 PPO 或蒸馏损失。部署权重包含配套 actor 和 critic，蒸馏权重仍只用于动作初始化或单候选评估。
 
-`public_seed` 包含初始候选位姿、候选宽度和开爪控制量、预抓位姿、手指关节位置/速度、相机位姿/内参及目标端面位姿。`privileged` 在此基础上追加锤子世界位姿及相对候选位姿、锤头中心、支撑物位姿/尺寸、质量、惯量和指面摩擦。两个观测末尾均追加本环境冻结的 B 目标位置和 wxyz 四元数。观测均在 reset 时生成并冻结，不包含本次尝试的结果快照。动作前 6 维用于 A 抓取，后 3 维延迟到 B 应用，旋转总幅度不超过 10°。
+`public_seed` 包含初始候选位姿、候选宽度和开爪控制量、预抓位姿、手指关节位置/速度、相机位姿/内参及目标端面位姿。`privileged` 在此基础上追加锤子世界位姿及相对候选位姿、锤头中心、支撑物位姿/尺寸、质量、惯量和指面摩擦。观测均在 reset 时生成并冻结，不包含本次尝试的结果快照。动作共 6 维，仅在 A 起点用于抓取残差，后续执行固定轨迹。
 
-三个阶段的策略都配置 `GaussianDistribution(init_std=0.3, std_type="scalar")`：每个动作维度各有一个可学习、与状态无关的标准差，共 9 个参数，并非 9 维共用一个标量。评估入口使用策略的确定性均值输出；训练采集使用采样输出。蒸馏的 MSE 只监督均值，不直接训练标准差。
+三个阶段的策略都配置 `GaussianDistribution(init_std=0.3, std_type="scalar")`：每个动作维度各有一个可学习、与状态无关的标准差，共 6 个参数，并非 6 维共用一个标量。评估入口使用策略的确定性均值输出；训练采集使用采样输出。蒸馏的 MSE 只监督均值，不直接训练标准差。
 
-三个阶段默认开启锤子质量/惯量倍率 `[0.9, 1.1]`、指面摩擦倍率 `[0.8, 1.2]` 和原有限位随机化；蒸馏及学生另启用深度噪声。
+蒸馏和学生阶段默认开启锤子质量/惯量倍率 `[0.9, 1.1]`、指面摩擦倍率 `[0.8, 1.2]` 和扭簧刚度倍率 `[0.8, 1.2]` 的均匀随机化；蒸馏及学生另启用深度噪声。
+每个环境在每次 reset 时为窄指和宽指扭簧采样一个共享倍率，基于名义刚度 `0.2 N·m/rad` 得到 `0.16～0.24 N·m/rad` 的刚度，改变扭簧恢复力矩。
 
-新增 B 指标 `b_position_error_before/b_rotation_error_before` 为微调前相对 B 原目标的实际误差；
-`b_position_error/b_rotation_error` 为微调后相对修正目标的实际误差。
-`b_face_center_error_before/b_face_center_error` 为对应时点实际敲击面距名义球心的距离，
-`b_rotation_adjustment` 为应用的旋转模长（rad），`b_alignment_success` 要求修正后
-位置误差 <5 mm 且姿态误差 <3°。上述指标仅记录，不添加奖励；`peak_force` 记录有效命中的真实峰值。
+`peak_force` 记录有效命中的真实峰值。
 
 ### 1.2 日志统计口径
 
@@ -105,35 +102,35 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 
 ## 3. 任务原始指标：Episode_Metrics
 
-关键时点：闭合结束约 `2.4 s`；抬升结束为快照 **A**，约 `3.2 s`；挥击前为快照 **B**，约 `16.2 s`。这些均为每次尝试内的仿真时间。
+关键时点：闭合结束约 `2.4 s`；抬升结束为快照 **A**，约 `3.2 s`；挥击前快照约 `16.2 s`。这些均为每次尝试内的仿真时间。
 
 | 指标 | 含义、计算时点与单位 | 单回合范围 | 注释 |
 | --- | --- | --- | --- |
 | `capture` | 闭合结束时 `(I_left + I_right) / 2`，接触形成分，无量纲。 | `{0, 0.5, 1}` | 闭合结束时，夹爪对应一侧是否存在至少一个有效锤柄接触（0，0.5，1） |
 | `lift_progress` | A 时刻双侧接触下，`clip(lift_height / lift_threshold, 0, 1)`；不足 15 cm 也可得部分分数。 | `[0,1]` | 抬升进度奖励，补充了不同高度提供的奖励，信息更密集 |
 | `lift_success` | A 时刻锤体真实高度增量至少 0.15 m，且双侧接触；记为 L。 | `{0,1}` | 完整抬升成功奖励 | 
-| `grasp_before_swing` | B 时刻 L 成立、未锁存掉落且仍双侧接触；记为 G，之后保持历史阶段事件含义。 | `{0,1}` | 验证挥击之前是否还能保持抓取 |
+| `grasp_before_swing` | 挥击前时刻 L 成立、未锁存掉落且仍双侧接触；记为 G，之后保持历史阶段事件含义。 | `{0,1}` | 验证挥击之前是否还能保持抓取 |
 | `wrap` | 闭合有符号包络放大 2 倍，加三阶段顶靠奖励后除以 1.5，公式见第 4 节。 | `[-76/165,5/3]`，约 `[-0.460606,1.666667]` | 判断是否形成有效包络以及计算两侧指节的包覆质量 |
 | `orientation` | A 时刻横向夹柄，平放时增加双向侧向接近偏好；乘 L，无量纲。 | `[0,1]` | 横向抓取与侧向抓取奖励 |
 | `distance` | A 时刻抓取中心到锤头中心沿柄轴的投影，除以 0.315 m 后裁剪并乘 L。 | `[0,1]` | 抓取位姿能形成的有效力臂 |
-| `stability` | 闭合结束与 B 两点的相对位姿差评分；B 起按当前实时持锤条件 H 门控。 | `[0,1]` | 仅比较闭合结束与挥击前锤子相较于夹爪的转动和滑动，不累计过程最大值 |
+| `stability` | 闭合结束与挥击前两点的相对位姿差评分；从挥击开始起按当前实时持锤条件 H 门控。 | `[0,1]` | 仅比较闭合结束与挥击前锤子相较于夹爪的转动和滑动，不累计过程最大值 |
 | `force` | 历史有效压缩法向力峰值 `peak_force / 10`，即每 10 N 得 1 分。 | `[0,∞)` | 命中后掉落不清零；不按冲量评分 |
 | `task_success` | `I_H × I[valid_strike > 0]`，在卸载结束、开始撤离前冻结；表示抓取—保持—命中—卸载结束仍持有。 | `{0,1}` |
 | `drop` | L 成立后，双侧接触连续缺失 20 ms 锁存的掉落事件。 | `{0,1}` | 抓取掉落后会施加惩罚 |
 | `lift_height` | A 时刻锤体原点相对场景初态的真实 z 增量，单位 m。 | 有符号实数 |
-| `translation_drift` | 闭合结束与 B 两点的夹爪系锤体位置差的欧氏距离，B 时刻写入后保持不变，单位 m；失败回合也记录。 | `[0,∞)` |
-| `rotation_drift` | 闭合结束与 B 两点的夹爪系锤体姿态最短旋转角误差，B 时刻写入后保持不变，单位 rad。 | `[0,π]` |
-| `peak_force` | B 之后至卸载结束、撤离之前，实时有效持锤命中的压缩法向力峰值，单位 N；后来掉落不追溯清零。 | `[0,∞)` |
+| `translation_drift` | 闭合结束与挥击前两点的夹爪系锤体位置差的欧氏距离，挥击前时刻写入后保持不变，单位 m；失败回合也记录。 | `[0,∞)` |
+| `rotation_drift` | 闭合结束与挥击前两点的夹爪系锤体姿态最短旋转角误差，挥击前时刻写入后保持不变，单位 rad。 | `[0,π]` |
+| `peak_force` | 挥击开始之后至卸载结束、撤离之前，实时有效持锤命中的压缩法向力峰值，单位 N；后来掉落不追溯清零。 | `[0,∞)` |
 | `valid_strike` | 是否曾在评分时窗内实时有效持锤命中，锁存后不清零。 | `{0,1}` |
 | `impact_impulse` | 首次有效命中起 40 ms 窗口内、H 成立时累计的法向冲量，单位 N·s；仅作指标。 | `[0,∞)` |
-| `seat_closure` / `seat_lift` / `seat_before_swing` | 闭合/A/B 时刻末尾五个连续 250 Hz 采样帧是否有效顶靠；各自无抬升门控，加入 wrap 时分别由 L/L/G 门控。 | 各为 `{0,1}` |
+| `seat_closure` / `seat_lift` / `seat_before_swing` | 闭合/抬升/挥击前时刻末尾五个连续 250 Hz 采样帧是否有效顶靠；各自无抬升门控，加入 wrap 时分别由 L/L/G 门控。 | 各为 `{0,1}` |
 | `collect` | 子步收集函数返回累计 peak_force 的子步平均，再对回合平均，单位 N；不是最终峰值或瞬时力均值。 | `[0,∞)`，同批次不超过平均 peak_force |
 
 ### 接触、掉落、顶靠与评分时窗
 
 复用六个指面各两个锤柄接触槽：前六槽属于 narrow（left），后六槽属于 wide（right）。每侧至少一个槽满足 `found > 0` 且法向力 `> 0`，才算该侧接触；`bilateral = left & right`。
 
-从 A 后第一个子步到既有卸载结束，只对尚未 `returning` 的环境更新失联计数。L 成立后，bilateral 连续失败 `round(0.02 / physics_dt)` 步（当前 10 步）锁存 `dropped`；恢复接触仅清零计数，不恢复掉落资格。B 时刻按原定义锁存 `grasp_valid = G`，之后不因挥击中掉落清零此控制快照。纯评分条件为 `H(t) = G & ~dropped(t) & bilateral(t)`。
+从 A 后第一个子步到既有卸载结束，只对尚未 `returning` 的环境更新失联计数。L 成立后，bilateral 连续失败 `round(0.02 / physics_dt)` 步（当前 10 步）锁存 `dropped`；恢复接触仅清零计数，不恢复掉落资格。挥击前时刻按原定义锁存 `grasp_valid = G`，之后不因挥击中掉落清零此控制快照。纯评分条件为 `H(t) = G & ~dropped(t) & bilateral(t)`。
 
 短于 20 ms 的暂时失联也会使当前 stability 为零；未锁存掉落时恢复双侧接触，stability 可重新按缓存的两点位姿差评分。最后一帧 bilateral 必须成立才能保留 stability 正分。掉落不回溯清零阶段事件、A 时刻几何分、历史 valid_strike、peak_force 或 impact_impulse。
 
@@ -151,18 +148,18 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 
 ### 4.1 单次尝试的奖励公式
 
-`I[条件]` 表示条件成立取 1，否则取 0；`clip` 为截断。闭合、A、B 时点以及 L、G、H 定义见第 3 节。事件每次尝试只计一次，子步仅更新缓存，reward manager 在环境步末加权求和。
+`I[条件]` 表示条件成立取 1，否则取 0；`clip` 为截断。闭合、抬升、挥击前时点以及 L、G、H 定义见第 3 节。事件每次尝试只计一次，子步仅更新缓存，reward manager 在环境步末加权求和。
 
 | 键名 | 原始评分 | 权重 | 奖励（惩罚）的情况与引导效果 |
 | --- | --- | ---: | --- |
 | capture | `(I_left + I_right) / 2`，闭合结束写入 | 2 | 闭合结束时，单侧形成有效锤柄接触得一半分，双侧接触得满分；引导抓取位姿先建立接触，再形成双侧夹持。 |
 | lift_progress | `I_bilateral(A) × clip(Δz / lift_threshold, 0, 1)` | 3 | A 时刻保持双侧接触且锤体被抬高时，按高度给予连续奖励，达到 15 cm 得满分；为尚未完成抬升的尝试提供渐进反馈，引导抓姿从接触向有效抬升改进。 |
 | lift_success | `L = I[Δz ≥ lift_threshold] × I_bilateral(A)` | 10 | A 时刻真实抬升高度至少 15 cm 且仍有双侧接触时奖励；引导形成能将锤子可靠抬起的有效抓取。 |
-| grasp_before_swing | `G = L × I[未掉落(B)] × I_bilateral(B)` | 5 | 已成功抬升、到 B 时刻未锁存掉落且仍有双侧接触时奖励；引导选择能经受搬运和挥击前姿态调整的抓姿。 |
-| wrap | `[L(2E + 0.10 seat_closure + 0.15 seat_lift) + 0.25 G seat_before_swing] / 1.5` | 3 | 成功抬升后，对闭合时真包络下的指节内弯包覆给予正分，外弯包络给予负分，并奖励闭合、抬升时的有效顶靠；B 时刻满足 G 再奖励有效顶靠。引导形成内弯包覆、锤柄顶靠支撑面的抓姿，提高抓持约束。 |
+| grasp_before_swing | `G = L × I[未掉落(pre_swing)] × I_bilateral(pre_swing)` | 5 | 已成功抬升、到挥击前时刻未锁存掉落且仍有双侧接触时奖励；引导选择能经受搬运和挥击前姿态调整的抓姿。 |
+| wrap | `[L(2E + 0.10 seat_closure + 0.15 seat_lift) + 0.25 G seat_before_swing] / 1.5` | 3 | 成功抬升后，对闭合时真包络下的指节内弯包覆给予正分，外弯包络给予负分，并奖励闭合、抬升时的有效顶靠；挥击前时刻满足 G 再奖励有效顶靠。引导形成内弯包覆、锤柄顶靠支撑面的抓姿，提高抓持约束。 |
 | orientation | `L × ((1 − 0.6 f) Q_perp + 0.6 f Q_side)` | 2 | 成功抬升后，两指连线越垂直于柄轴得分越高；按初态柄轴接近水平的程度连续加权侧向抓取偏好，f 定义见下文。 |
 | distance | `L × clip((p_grip − p_head)·h_A / distance_ref, 0, 1)` | 5 | 成功抬升后，抓取中心沿柄轴正向距锤头越远，得分越高，达到参考距离后饱和；引导在锤柄上选择远离锤头的位置，增大有效力臂。 |
-| stability | `I_H × S(x)`，分段线性插值与指数衰减，见下文 | 30 | 实时持锤条件 H 成立时，闭合结束与 B 两点之间锤子相对夹爪的平移、旋转差越小，得分越高；引导抓姿减少搬运后的滑移和转动，并在评分结束时保持有效持锤。 |
+| stability | `I_H × S(x)`，分段线性插值与指数衰减，见下文 | 30 | 实时持锤条件 H 成立时，闭合结束与挥击前两点之间锤子相对夹爪的平移、旋转差越小，得分越高；引导抓姿减少搬运后的滑移和转动，并在评分结束时保持有效持锤。 |
 | force | `mean_force`，有效命中峰值保留 | 10 | 评分时窗内满足 H 且锤头有效命中目标端盖时，压缩法向力峰值越大，奖励越高；引导选择能将挥击转化为较大目标法向冲击力的抓姿，历史得分在随后掉落时保留。 |
 | task_success | `I_H × I[valid_strike > 0]`，撤离前终值 | 100 | 曾有效命中，且卸载结束、开始撤离前仍满足 H 时奖励；引导完成抓取、抬升、保持、命中并持锤至卸载结束的完整任务。 |
 | drop | `I_dropped`，锁存 | −20 | 成功抬升后，在掉落检测时窗内双侧接触条件连续不成立至少 20 ms 时锁存惩罚，恢复接触也不撤销；引导避免搬运、挥击和卸载期间失去有效夹持。 |
@@ -171,7 +168,7 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 
 **距离**：`p_grip` 为 A 时刻两指尖中点，`p_head = p_hammer − 0.24 h_A`。奖励使用有符号柄轴投影，横向偏移不增加 distance。
 
-**稳定性**：闭合结束（约 2.4 s）保存夹爪系锤体位姿，在 B（挥击前，约 16.2 s）计算 `ep = ||p_rel(B) − p_rel(closure)||`、`er = angle(q_rel(closure), q_rel(B))`。不读取中间过程或 B 之后的位姿漂移。A 快照仍用于原有挥击轨迹规划。归一化误差为：
+**稳定性**：闭合结束（约 2.4 s）保存夹爪系锤体位姿，在挥击前（约 16.2 s）计算 `ep = ||p_rel(pre_swing) − p_rel(closure)||`、`er = angle(q_rel(closure), q_rel(pre_swing))`。不读取中间过程或挥击开始之后的位姿漂移。A 快照仍用于原有挥击轨迹规划。归一化误差为：
 
 ```text
 x = sqrt(0.5 × ((ep / stability_position_scale)²
@@ -187,9 +184,9 @@ S(x) = 1 − 0.1x                              (0 ≤ x ≤ 1)
        0.5 exp(−(x − c) / (2(c − b)))        (x > c)
 ```
 
-H 成立时，零误差、15 mm/5°、20 mm/10°、30 mm/20° 的平移/旋转误差分别得 1、0.90、0.75、0.50，对应加权奖励 20、18、15、10。节点之间线性插值，末段与上一段的分数和斜率连续，随误差增大单调趋近零。两项误差不匹配时仍按上述均方根合成计算。B 前稳定性和两项误差均为零；B 时刻写入两点误差，之后仅根据实时 H 更新评分，卸载结束后冻结。
+H 成立时，零误差、15 mm/5°、20 mm/10°、30 mm/20° 的平移/旋转误差分别得 1、0.90、0.75、0.50，对应加权奖励 20、18、15、10。节点之间线性插值，末段与上一段的分数和斜率连续，随误差增大单调趋近零。两项误差不匹配时仍按上述均方根合成计算。挥击前稳定性和两项误差均为零；挥击前时刻写入两点误差，之后仅根据实时 H 更新评分，卸载结束后冻结。
 
-**有效命中与冲量**：B 之后、卸载结束且尚未撤离时，`F_n = max(−F_head→cap · n_target, 0)`，沿用锤头 geom—端盖 geom 匹配。`V = H & touching & (F_n > 0)`；valid_strike 锁存是否曾出现 V，peak_force 仅累计 V 时的峰值，保证 `valid_strike == 0 ⇒ peak_force == 0`。
+**有效命中与冲量**：挥击开始之后、卸载结束且尚未撤离时，`F_n = max(−F_head→cap · n_target, 0)`，沿用锤头 geom—端盖 geom 匹配。`V = H & touching & (F_n > 0)`；valid_strike 锁存是否曾出现 V，peak_force 仅累计 V 时的峰值，保证 `valid_strike == 0 ⇒ peak_force == 0`。
 
 首次 V 的物理子步记为 first_hit_step。设 `N_window = round(impact_window_s / physics_dt)`，在 `first_hit_step > 0` 且 `0 ≤ k − first_hit_step < N_window`、H 成立、尚未撤离时，`J ← J + F_n × physics_dt`。首次命中当前子步计入，窗口内接触反复可以继续积分，窗口外不再增加；不对整段卸载或撤离积分。
 
@@ -226,19 +223,19 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 | --- | --- | --- |
 | `Curriculum/scene_sgs/sgs_mean_success` | 每个已有历史的训练场景先计算最近最多 100 个已完成尝试的二值 `task_success` 均值，再对这些场景等权求均值。 | `[0,1]`；尚无任何历史时日志为 0。未观察场景用于采样的 `p_i=0.5` 是先验，不计入该实测均值；初始化和恢复后的零长度回合不计入历史。 |
 | `Curriculum/scene_sgs/sgs_mean_probability` | 全部训练场景的归一化采样概率均值。 | 有 N 个训练场景时为 `1/N`，不是成功率或每批整数名额。 |
-| `Curriculum/scene_sgs/sgs_min_probability` / `Curriculum/scene_sgs/sgs_max_probability` | 全部训练场景采样概率的最小值与最大值。 | 位于 `[0,1]`，首次更新前均为 `1/N`；评估场景不参与这些统计。M 个重置环境对场景 i 的预期采样数为 `M*q_i`，实际数量可波动。 |
+| `Curriculum/scene_sgs/sgs_min_probability` / `Curriculum/scene_sgs/sgs_max_probability` | 全部训练场景采样概率的最小值与最大值。 | 位于 `[0,1]`，首次更新前均为 `1/N`；默认均匀混合后每个训练场景概率至少为 `0.2/N`。评估场景不参与这些统计。M 个重置环境对场景 i 的预期采样数为 `M*q_i`，实际数量可波动。 |
 | `Curriculum/scene_sgs/sgs_observed_scenes` | 有完成回合历史的训练场景数。 | 整数 `[0,N]`；同场景的并行完成回合全部计入最近 100 条历史。 |
 | `Episode_Termination/attempt_complete` | 本次重置的环境中，满足 `episode_length_buf >= 1` 的数量，表示一次尝试正常结束。 | 单次统计为整数 `[0, num_envs]`；日志还会对本轮各次统计求均值，因此格式可带小数。当前 128 个并行环境每步都结束一个回合，通常为 128；它是**结束数量**，不是成功数量，也不是百分比。 |
 
 教师从第一次 reset 起开放全部训练场景，reset 仍只从离线连续稳定位姿缓存抽样。课程在 reset 事件和动作评分清零前读取旧 `scene_id` 及最终 `task_success`，每个训练场景单独保存最近 100 条二值成功历史；评估场景不累计历史。场景成功率 `p_i` 为历史均值，无历史时以 0.5 计算优先级。首次更新前在训练场景间均匀采样，此后每 10 个含完成回合的批次更新一次，无额外热身。
 
-默认 `t=0.5`、`kappa=1.0`、`T=2.0`、`eps=1e-4`，仅在训练场景间计算 `w_i = (p_i+eps)^(kappa*t) × (1-p_i+eps)^(kappa*(1-t))`、`logit_i = log(max(w_i,eps)+eps)/T`，再用 `softmax(logit)` 得到 `q_i`。成功率接近 0.5 的场景优先级较高，接近 0 或 1 时较低；每个训练场景直接使用 `q_i` 作为采样权重，评估场景权重为零。SGS 仅依据成功历史，原有奖励及力、冲量指标保持不变。参数以 `run_config.json` 的 `scene_sgs` 为准；checkpoint 的 `infos["scene_sgs"]` 保存逐场景历史、按训练场景行号递增顺序排列的概率及完成批次计数。普通 `--resume` 恢复该状态；显式 `--reset-scene-sgs` 清空课程并采用本次 `--data-file`，不迁移旧课程状态。
+默认 `t=0.0`、`kappa=1.0`、`T=1.0`、`eps=1e-4`、`uniform_mix=0.2`，仅在训练场景间计算 `w_i = (p_i+eps)^(kappa*t) × (1-p_i+eps)^(kappa*(1-t))`、`logit_i = log(max(w_i,eps)+eps)/T`，再用 `q_adaptive = softmax(logit)` 得到自适应概率，最终 `q_i = 0.8 × q_adaptive_i + 0.2/N_train`。成功率越接近 0，场景优先级越高；忽略数值处理项时，80% 的采样概率按失败率分配，其余 20% 均匀分配给全部训练场景。每个训练场景直接使用 `q_i` 作为采样权重，评估场景权重为零。SGS 仅依据成功历史，原有奖励及力、冲量指标保持不变。参数以 `run_config.json` 的 `scene_sgs` 为准；checkpoint 的 `infos["scene_sgs"]` 保存逐场景历史、按训练场景行号递增顺序排列的概率及完成批次计数。普通 `--resume` 恢复该状态；旧配置切换到当前策略须显式使用 `--reset-scene-sgs --data-file 场景缓存路径`，清空课程并采用当前参数和本次数据路径，可沿用原缓存，不迁移旧课程状态。
 
 `attempt_complete` 配置为正常 terminal，`time_out=False`，环境还设置 `is_finite_horizon=True`；抬升失败、掉落、未命中同样执行到完整环境步结束，不产生独立的失败终止日志。PPO 不将下一次 reset 后的初始状态作为本次尝试的 bootstrap 价值。
 
 ## 6. 如何解读训练和评估结果
 
-- 对同一批次、相同样本，应满足 `task_success ≤ valid_strike ≤ grasp_before_swing ≤ lift_success`。抬升成功率高而挥击前有效抓持低，说明搬运过程中发生掉落锁存或 B 时刻失去双侧接触；不能仅凭这两个均值确定具体原因。
+- 对同一批次、相同样本，应满足 `task_success ≤ valid_strike ≤ grasp_before_swing ≤ lift_success`。抬升成功率高而挥击前有效抓持低，说明搬运过程中发生掉落锁存或挥击前时刻失去双侧接触；不能仅凭这两个均值确定具体原因。
 - `peak_force` 是包含失败和未命中零值的平均有效峰值，同时受命中率和命中力度影响。若同批次 `mean(valid_strike) > 0`，可用 `mean(peak_force) / mean(valid_strike)` 查看命中回合的平均峰值；更准确的结果应从逐回合 NPZ 按 `valid_strike == 1` 筛选计算。
 - `translation_drift` 和 `rotation_drift` 是闭合结束与挥击前的两点差值，包含失败回合。平移单位是 m、旋转单位是 rad，较大的漂移均值需要结合逐回合分布和回放判断；这两项不再表示过程最大漂移，与旧评估结果的含义不同。
 - `wrap`、`stability`、`force` 是连续评分；例如 `stability=0.2` 不表示稳定成功率为 20%。只有单回合二值指标的均值才可直接读成比例。`seat_*` 的均值也只是各时点的顶靠比例，不等于抓持成功率。
@@ -254,7 +251,7 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 - [动作与逐子步指标计算](mdp/actions.py)：关键时点、阶段门控、漂移、包络、稳定性、法向冲量与有效力峰值。
 - [包络和顶靠几何评分](../generation/enclosure.py)：真包络与顶靠判据、角度评分。
 - [奖励读取](mdp/rewards.py)、[终止条件](mdp/terminations.py)、[课程逻辑](mdp/curriculum.py)。
-- [观测读取](mdp/observations.py)、[重置与观测构造](mdp/resets.py)：94/57 维观测、冻结深度和随机化。
+- [观测读取](mdp/observations.py)、[重置与观测构造](mdp/resets.py)：87/50 维观测、冻结深度和随机化。
 - [网络与算法配置](rl_cfg.py)、[训练入口](train.py)：教师/学生网络、PPO/蒸馏参数、每次采集步数、课程命令行默认值，以及 `_RewardLogVecEnvWrapper` 的加权奖励日志覆盖逻辑。
 - [评估入口](evaluate.py)、[场景总体对比](compare_evaluations.py)：确定性评估、逐回合原始指标，以及 SDK 最高分与 critic 所选候选的对比统计。
 - 本机框架源码位于 `/home/ubuntu20/anaconda3/envs/hammer/lib/python3.11/site-packages/` 下：`mjlab/managers/{metrics,reward,termination}_manager.py` 定义底层日志聚合；`mjlab/rl/config.py` 定义 PPO 默认值；`rsl_rl/utils/logger.py` 定义吞吐、128 回合滑动窗口与打印；`rsl_rl/algorithms/{ppo,distillation}.py`、`rsl_rl/models/{mlp_model,cnn_model}.py`、`rsl_rl/modules/{distribution,cnn}.py` 定义损失、网络、熵与标准差边界。

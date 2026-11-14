@@ -1,4 +1,4 @@
-"""教师按训练场景的近期完整成功率，将 SGS 采样集中在学习边界。"""
+"""教师按训练场景的近期失败率分配 80% 采样概率，其余 20% 均匀分配。"""
 
 import torch
 
@@ -6,10 +6,11 @@ import torch
 SGS_PARAMS = {
     "history_size": 100,
     "update_interval": 10,
-    "target_success": 0.5,
+    "target_success": 0.0,
     "concentration": 1.0,
-    "temperature": 2.0,
+    "temperature": 1.0,
     "epsilon": 1e-4,
+    "uniform_mix": 0.2,
 }
 
 
@@ -40,6 +41,7 @@ class SceneSgsCurriculum:
         concentration,
         temperature,
         epsilon,
+        uniform_mix,
     ):
         completed = env.episode_length_buf[env_ids] >= 1
         if completed.any():
@@ -68,6 +70,10 @@ class SceneSgsCurriculum:
             ).pow(concentration * (1.0 - target_success))
             logits = (weight.clamp_min(epsilon) + epsilon).log() / temperature
             self.probabilities = torch.softmax(logits, dim=0)
+            self.probabilities = (
+                (1.0 - uniform_mix) * self.probabilities
+                + uniform_mix / len(self.train_ids)
+            )
 
         self.task.sampling_weights.zero_()
         self.task.sampling_weights[self.train_mask] = self.probabilities

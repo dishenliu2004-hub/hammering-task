@@ -1,4 +1,4 @@
-"""离线混合四类历史姿态与连续随机姿态，缓存稳定 A 初态及 AnyGrasp 候选。"""
+"""离线按教师 v1 接触几何采样稳定位姿，缓存 A 初态及 AnyGrasp 候选。"""
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -9,17 +9,96 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+import torch
+from mjlab.managers.event_manager import RecomputeLevel
+from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
 from scipy.spatial.transform import Rotation
 
 from generation.enclosure import build_enclosure_geometry
 from generation.grasp_hammer import generate_grasps, candidate_to_mount
-from generation.hammer_generate import create_simulation, sync_data, sample_legacy_placement, SCENE
+from generation.hammer_generate import (create_simulation, sync_data, sample_legacy_placement,
+    support_contacts, SCENE, STABILITY_DURATION, STABILITY_INTERVAL, STABILITY_POSITION,
+    STABILITY_ROTATION_DEG)
 from generation.hammer_inertia import add_head_mass
 
 STATE_FIELDS = ("qpos", "qvel", "act", "ctrl", "mocap_pos", "mocap_quat", "eq_active",
                 "qfrc_applied", "xfrc_applied", "qacc_warmstart")
+MODEL_FIELDS = ("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
+                "dof_invweight0", "body_invweight0", "tendon_length0",
+                "tendon_invweight0", "actuator_acc0")
 # 固定标定工作区：支架及其上方；不依赖本次锤子真值位姿。
 WORKSPACE = ((0.14, -0.16, 0.11), (0.46, 0.41, 0.72))
+
+
+def restore_bank(sim, bank, indices):
+    """与 prepare/reset_scene 相同的模型参数与完整缓存状态，不绑定抓取候选。"""
+    model = sim.mj_model
+    h, body = model.geom("hammer_handle").id, model.body("hammer_Object").id
+
+    def tensor(values, target):
+        return torch.as_tensor(values, dtype=target.dtype, device=sim.device)
+
+    sizes = tensor(bank["handle_size"][indices], sim.model.geom_size)
+    sim.model.geom_size[:, h, :2] = sizes
+    sim.model.geom_rbound[:, h] = sizes.sum(dim=1)
+    sim.model.geom_aabb[:, h, 1, :2] = sizes[:, :1]
+    sim.model.geom_aabb[:, h, 1, 2] = sizes.sum(dim=1)
+    sim.model.body_pos[:, body] = tensor(bank["reference_pos"][indices], sim.model.body_pos)
+    sim.model.body_quat[:, body] = tensor(bank["reference_quat"][indices], sim.model.body_quat)
+    sim.recompute_constants(RecomputeLevel.set_const_0)
+    # set_const 可能改写 data，必须在其后恢复包括 warmstart 在内的全部状态。
+    sim.reset()
+    for name in STATE_FIELDS:
+        target = getattr(sim.data, name)
+        target[:] = tensor(bank[name][indices], target)
+    sim.data.time[:] = 0
+    sim.forward()
+
+
+def bank_simulation(bank, indices, device="cuda:0"):
+    spec = mujoco.MjSpec.from_file(str(SCENE))
+    add_head_mass(spec, float(bank["hammer_head_extra_mass"]))
+    spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+    spec.option.noslip_iterations = 0
+    spec.geom("hammer_head").condim = 6
+    model = spec.compile()
+    opt = model.opt
+    # 与 generation.hammer_generate.create_simulation 使用相同的物理设置。
+    cfg = SimulationCfg(nconmax=128, njmax=1024, mujoco=MujocoCfg(
+        timestep=opt.timestep,
+        integrator=mujoco.mjtIntegrator(opt.integrator).name.removeprefix("mjINT_").lower(),
+        cone="elliptic",
+        jacobian=mujoco.mjtJacobian(opt.jacobian).name.removeprefix("mjJAC_").lower(),
+        solver=mujoco.mjtSolver(opt.solver).name.removeprefix("mjSOL_").lower(),
+        impratio=opt.impratio, iterations=opt.iterations, tolerance=opt.tolerance,
+        ls_iterations=opt.ls_iterations, ls_tolerance=opt.ls_tolerance,
+        ccd_iterations=opt.ccd_iterations, gravity=tuple(opt.gravity),
+        disableflags=("multiccd",)))
+    sim = Simulation(len(indices), cfg, model=model, device=device)
+    sim.expand_model_fields(MODEL_FIELDS)
+    restore_bank(sim, bank, indices)
+    return sim
+
+
+def _stable_window(simulation, position, quaternion):
+    """整个观察窗口相对同一初态检查位姿和 GPU 有效支架接触。"""
+    hammer = simulation.mj_model.body("hammer_Object").id
+    rotation = Rotation.from_quat(quaternion[[1, 2, 3, 0]])
+    stride = round(STABILITY_INTERVAL / simulation.mj_model.opt.timestep)
+    for sample_index in range(round(STABILITY_DURATION / STABILITY_INTERVAL) + 1):
+        if sample_index:
+            for _ in range(stride):
+                simulation.step()
+        simulation.forward()
+        current_pos = simulation.data.xpos[0, hammer].cpu().numpy()
+        current_quat = simulation.data.xquat[0, hammer].cpu().numpy()
+        displacement = np.linalg.norm(current_pos - position)
+        current_rotation = Rotation.from_quat(current_quat[[1, 2, 3, 0]])
+        angle = (rotation.inv() * current_rotation).magnitude()
+        if (displacement > STABILITY_POSITION or angle > np.deg2rad(STABILITY_ROTATION_DEG)
+                or not support_contacts(simulation)[0]):
+            return False
+    return True
 
 
 def create_scene(rng, hammer_head_extra_mass=0.0, placement=4):
@@ -34,42 +113,12 @@ def create_scene(rng, hammer_head_extra_mass=0.0, placement=4):
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     hammer = model.body("hammer_Object")
-    hammer_geoms = tuple(model.geom(name) for name in ("hammer_handle", "hammer_neck", "hammer_head"))
-    support_geoms = tuple(model.geom(name) for name in
-                          ("support_L_support_short_leg", "support_L_support_long_leg"))
-    floor, wall = support_geoms
-    wall_min, wall_max = wall.pos - wall.size, wall.pos + wall.size
+    scene = placement if placement < 4 else int(rng.choice((0, 2, 3)))
     while True:
         mujoco.mj_resetData(model, data)
         mujoco.mj_forward(model, data)
-        if placement < 4:
-            position, local_quat = sample_legacy_placement(rng, placement)
-        else:
-            # 连续采样支架局部位姿；Rz(yaw) @ Ry(-tilt) @ Rx(roll)，局部 +X 为柄轴。
-            position = np.array([rng.uniform(0.12, 0.42), rng.uniform(-0.10, 0.10), 0.0])
-            yaw, tilt, roll = (rng.uniform(-np.pi, np.pi), rng.uniform(-np.pi / 2, np.pi / 2),
-                               rng.uniform(-np.pi, np.pi))
-            rotation = Rotation.from_euler("ZYX", [yaw, -tilt, roll])
-            local_quat = rotation.as_quat()[[3, 0, 1, 2]]
-            # 用编译模型的 capsule 端点/半径与 mesh 顶点求投影，预留 1 mm 接触间隙。
-            # 挡板投影重叠时提高初始高度；不裁剪 x/y，也不要求锤体完全落在底板内。
-            for geom in hammer_geoms:
-                geom_rotation = Rotation.from_quat(geom.quat[[1, 2, 3, 0]])
-                if geom.type[0] == mujoco.mjtGeom.mjGEOM_CAPSULE:
-                    endpoints = geom.pos + geom_rotation.apply(
-                        np.array([[0.0, 0.0, -geom.size[1]], [0.0, 0.0, geom.size[1]]]))
-                    points = rotation.apply(endpoints)
-                    lower, upper = points.min(axis=0) - geom.size[0], points.max(axis=0) + geom.size[0]
-                else:
-                    mesh = geom.dataid[0]
-                    start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
-                    points = rotation.apply(geom.pos + geom_rotation.apply(model.mesh_vert[start:start + count]))
-                    lower, upper = points.min(axis=0), points.max(axis=0)
-                position[2] = max(position[2], floor.pos[2] + floor.size[2] - lower[2] + 0.001)
-                if np.all(position[:2] + upper[:2] > wall_min[:2]) and np.all(
-                    position[:2] + lower[:2] < wall_max[:2]
-                ):
-                    position[2] = max(position[2], wall_max[2] - lower[2] + 0.001)
+        position, local_quat = sample_legacy_placement(
+            rng, scene, model=model, expanded=placement == 4)
         support = data.body("support_L_support")
         # 参考位姿仍由支架局部转换到世界；沉降后的实际位姿保存在 data。
         hammer.pos[:] = support.xpos + support.xmat.reshape(3, 3) @ position
@@ -80,25 +129,8 @@ def create_scene(rng, hammer_head_extra_mass=0.0, placement=4):
         for _ in range(round(2.0 / model.opt.timestep)):
             simulation.step()
         sync_data(simulation, data)
-        settled_pos = data.body("hammer_Object").xpos.copy()
-        settled_rotation = Rotation.from_quat(data.body("hammer_Object").xquat[[1, 2, 3, 0]])
-        for _ in range(round(0.5 / model.opt.timestep)):
-            simulation.step()
-        sync_data(simulation, data)
-        # 根据观察窗口末态的真实接触接纳支架上的稳定结果。
-        mujoco.mj_forward(model, data)
-        displacement = np.linalg.norm(data.body("hammer_Object").xpos - settled_pos)
-        final_rotation = Rotation.from_quat(data.body("hammer_Object").xquat[[1, 2, 3, 0]])
-        angle = (settled_rotation.inv() * final_rotation).magnitude()
-        support_contact = any(
-            contact.efc_address >= 0 and (
-                (model.geom_bodyid[contact.geom1] == hammer.id
-                 and contact.geom2 in (floor.id, wall.id))
-                or (model.geom_bodyid[contact.geom2] == hammer.id
-                    and contact.geom1 in (floor.id, wall.id)))
-            for contact in data.contact[:data.ncon]
-        )
-        if displacement < 0.005 and angle < np.deg2rad(3) and support_contact:
+        if _stable_window(simulation, data.body("hammer_Object").xpos.copy(),
+                          data.body("hammer_Object").xquat.copy()):
             simulation.data.time[:] = 0
             sync_data(simulation, data)
             return model, data, simulation
@@ -110,6 +142,24 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0, placeme
 
     while True:
         model, data, simulation = create_scene(rng, hammer_head_extra_mass, placement)
+        # S 是最终准备保存的完整状态；复核只推进重建后的单环境仿真。
+        bank = {name: getattr(data, name).copy()[None] for name in STATE_FIELDS}
+        bank.update(handle_size=model.geom("hammer_handle").size[:2].copy()[None],
+                    reference_pos=model.body("hammer_Object").pos.copy()[None],
+                    reference_quat=model.body("hammer_Object").quat.copy()[None],
+                    hammer_pos=data.body("hammer_Object").xpos.copy()[None],
+                    hammer_quat=data.body("hammer_Object").xquat.copy()[None],
+                    hammer_head_extra_mass=np.asarray(hammer_head_extra_mass))
+        device = simulation.device
+        del simulation
+        indices = np.array([0])
+        simulation = bank_simulation(bank, indices, device=device)
+        if not _stable_window(simulation, bank["hammer_pos"][0], bank["hammer_quat"][0]):
+            del simulation
+            continue
+        # 回到同一个 S 后才采图；不保存复核推进后的末态。
+        restore_bank(simulation, bank, indices)
+        sync_data(simulation, data)
         camera = CameraRGBPointCloud(model)
         camera.renderer.update_scene(data, camera=camera.camera)
         camera.renderer.enable_segmentation_rendering()
@@ -141,7 +191,7 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0, placeme
 
 
 def capture_candidates(model, data, camera, sample, count, workspace):
-    """A/B 共用原相机、SDK、NMS、覆盖采样和一次 30 mm 转换。"""
+    """沿用原相机、SDK、NMS、覆盖采样和一次 30 mm 转换。"""
     try:
         frame = camera.capture(data)
         depth = camera.renderer.render()[::8, ::8].copy()

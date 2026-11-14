@@ -27,15 +27,15 @@ SCENE = Path(__file__).resolve().parents[1] / "assets/scenes/scene.xml"
 @dataclass(kw_only=True)
 class HammerEnvCfg(ManagerBasedRlEnvCfg):
     data_file: str = "weight/hammer_rl/reset_bank_ab_256.npz"
-    b_pose_file: str = "weight/hammer_rl/b_pose_bank_40.npz"
     stage: str = "teacher"  # teacher / distill / student
     split: str = "train"
 
     randomize_physics: bool = False
     visual_noise: bool = False
-    # 质量/惯量与指面摩擦相对名义值的随机倍率。
+    # 质量/惯量、指面摩擦与扭簧刚度相对名义值的随机倍率。
     mass_range: tuple = (0.9, 1.1)
     friction_range: tuple = (0.8, 1.2)
+    spring_stiffness_range: tuple = (0.8, 1.2)
 
     lift_threshold: float = 0.15  # 有效抬升高度，m
     distance_ref: float = 0.315  # 距离归一化尺度，m
@@ -61,7 +61,6 @@ def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
 
 
 def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/reset_bank_ab_256.npz",
-                 b_pose_file="weight/hammer_rl/b_pose_bank_40.npz",
                  stage="teacher", num_envs=128, split="train", seed=42,
                  training=True) -> HammerEnvCfg:
     # 使用总场景编译后的物理步长。
@@ -96,15 +95,15 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
     )
 
     # 三个阶段使用同一物理随机化分布；深度噪声仅用于蒸馏和学生。
-    #randomize = True
+    randomize = True
     #只在蒸馏和学生模型训练的时候引入域随机化
-    randomize = stage in ("distill", "student")
+    #randomize = stage in ("distill", "student")
     events = {}
     if randomize:
         events["physics"] = EventTermCfg(func=resets.randomize_physics, mode="reset")
     events["scene"] = EventTermCfg(func=resets.reset_scene, mode="reset")
 
-    cfg = HammerEnvCfg(data_file=str(data_file), b_pose_file=str(b_pose_file),
+    cfg = HammerEnvCfg(data_file=str(data_file),
         stage=stage, split=split, seed=seed,
         randomize_physics=randomize, visual_noise=stage in ("distill", "student"),
         scene=SceneCfg(num_envs=num_envs, sensors=sensors,
@@ -133,7 +132,8 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         rewards={name: RewardTermCfg(func=rewards.score, weight=weight, params={"name": name})
                  for name, weight in zip(("capture", "lift_progress", "lift_success", "grasp_before_swing",
                      "wrap", "orientation", "distance", "stability", "force", "task_success", "drop"),
-                     (2, 3, 10, 5, 3, 2, 5, 30, 10, 100, -30))},
+                     #(2, 3, 10, 5, 3, 2, 5, 30, 10, 100, -30))},
+                     (0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0))},
         terminations={"attempt_complete": TerminationTermCfg(func=terminations.attempt_complete)},
         # 子步收集快照和平均力，回合末记录最终指标。
         metrics={"collect": MetricsTermCfg(func=collect_attempt, per_substep=True),
@@ -142,10 +142,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                         "impact_impulse", "task_success", "drop",
                         "translation_drift", "rotation_drift", "mean_force", "valid_strike",
                         "lift_height", "grasp_before_swing",
-                        "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
-                        "b_position_error_before", "b_rotation_error_before", "b_face_center_error_before",
-                        "b_position_error", "b_rotation_error", "b_face_center_error",
-                        "b_rotation_adjustment", "b_alignment_success")}},
+                        "seat_closure", "seat_lift", "seat_before_swing", "peak_force")}},
         # 仅教师训练启用逐场景 SGS。
         curriculum={"scene_sgs": CurriculumTermCfg(func=curriculum.SceneSgsCurriculum,
                                                    params=curriculum.SGS_PARAMS.copy())}

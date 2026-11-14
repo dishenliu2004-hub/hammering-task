@@ -32,7 +32,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluation = [
         sys.executable, "-m", "hammer_rl.evaluate",
-        "--split", "eval", "--b-pose-file", config["b_pose_file"],
+        "--split", "eval",
         "--episodes", str(args.episodes), "--num-envs", str(args.num_envs),
         "--seed", str(args.seed),
         "--device", args.device, "--headless",

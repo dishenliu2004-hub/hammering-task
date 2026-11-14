@@ -1,4 +1,4 @@
-"""一次决策输出 A 抓取 6D 与 B 调姿 3D，复用固定规则的 GPU 执行器。"""
+"""一次 seed 局部 6D 残差，以及 knock_path.py 固定规则的 GPU 批量表达。"""
 
 from dataclasses import dataclass
 import math
@@ -11,7 +11,7 @@ from mjlab.utils.lab_api.math import (axis_angle_from_quat, quat_apply, quat_app
     quat_box_plus, quat_conjugate, quat_error_magnitude, quat_mul)
 
 from generation.enclosure import build_enclosure_geometry, compute_enclosure_score, compute_handle_seating
-from generation.hammer_geometry import HEAD_CENTER_LOCAL, STRIKE_FACE_CENTER_LOCAL, B_SPHERE_RADIUS
+from generation.hammer_geometry import HEAD_CENTER_LOCAL, STRIKE_FACE_CENTER_LOCAL
 from .resets import initialize_task
 
 DT = 0.02
@@ -54,7 +54,6 @@ def sampled_progress(substep, duration, substeps, quintic=False):
 class GraspResidualActionCfg(ActionTermCfg):
     position_scale: float = 0.10
     rotation_scale: float = math.pi / 5
-    b_rotation_scale: float = math.pi / 18
     unload_time: float = 1.0
 
     def build(self, env):
@@ -73,31 +72,6 @@ def refine_pose(seed_pos, seed_quat, actions, cfg):
     approach[:, 2] = 1
     pregrasp = final_pos - 0.10 * quat_apply(final_quat, approach)
     return final_pos, final_quat, pregrasp
-
-
-def refine_b_pose(position, quaternion, nominal_face, actions, max_rotation=math.pi / 18):
-    """总角度至多 10°；绕锤头旋转，二分截取球内的最大残差比例。"""
-    head_local = position.new_tensor(HEAD_CENTER_LOCAL).expand_as(position)
-    face_local = position.new_tensor(STRIKE_FACE_CENTER_LOCAL).expand_as(position)
-    head = position + quat_apply(quaternion, head_local)
-    delta = torch.tanh(actions)
-    delta = max_rotation * delta / delta.norm(dim=-1, keepdim=True).clamp_min(1.0)
-
-    def pose(scale):
-        quat = quat_box_plus(quaternion, delta * scale)
-        pos = head - quat_apply(quat, head_local)
-        face = pos + quat_apply(quat, face_local)
-        return pos, quat, (face - nominal_face).norm(dim=-1, keepdim=True)
-
-    low, high = torch.zeros_like(delta[:, :1]), torch.ones_like(delta[:, :1])
-    full_valid = pose(high)[2] <= B_SPHERE_RADIUS
-    for _ in range(20):
-        middle = (low + high) / 2
-        valid = pose(middle)[2] <= B_SPHERE_RADIUS
-        low, high = torch.where(valid, middle, low), torch.where(valid, high, middle)
-    scale = torch.where(full_valid, torch.ones_like(low), low)
-    pos, quat, _ = pose(scale)
-    return pos, quat, delta * scale
 
 
 class GraspResidualAction(ActionTerm):
@@ -121,7 +95,7 @@ class GraspResidualAction(ActionTerm):
         self.moving = torch.tensor(np.flatnonzero(np.isin(model.body_rootid,
             [model.body("gripper_dynamic_base").id, self.hammer])), device=self.device)
         self.gravity = torch.tensor(model.opt.gravity.copy(), dtype=torch.float32, device=self.device)
-        self._raw_action = torch.zeros((env.num_envs, 9), device=self.device)
+        self._raw_action = torch.zeros((env.num_envs, 6), device=self.device)
         self.head_local = self._raw_action.new_tensor(HEAD_CENTER_LOCAL).expand(env.num_envs, -1)
         self.face_local = self._raw_action.new_tensor(STRIKE_FACE_CENTER_LOCAL).expand(env.num_envs, -1)
         self.unit = torch.eye(3, device=self.device).expand(env.num_envs, -1, -1)
@@ -139,7 +113,6 @@ class GraspResidualAction(ActionTerm):
         self.closure_enclosure = torch.zeros(env.num_envs, device=self.device)
         self.lift_end = round(3.2 / env.physics_dt)
         self.swing_start = round(16.2 / env.physics_dt)
-        self.b_adjust_start = self.swing_start - round(0.5 / env.physics_dt)
         self.swing_end = self.swing_start + self.swing_steps * self.swing_substeps
         self.unload_end = self.swing_end + round(cfg.unload_time / env.physics_dt)
         self.return_steps = round(0.45 / DT) * self.substeps
@@ -150,10 +123,7 @@ class GraspResidualAction(ActionTerm):
             "impact_impulse", "task_success", "drop",
             "translation_drift", "rotation_drift", "mean_force",
             "valid_strike", "lift_height", "grasp_before_swing",
-            "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
-            "b_position_error_before", "b_rotation_error_before", "b_face_center_error_before",
-            "b_position_error", "b_rotation_error", "b_face_center_error",
-            "b_rotation_adjustment", "b_alignment_success")}
+            "seat_closure", "seat_lift", "seat_before_swing", "peak_force")}
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         self.relative_closure_pos = torch.zeros((env.num_envs, 3), device=self.device)
         self.relative_closure_quat = self.identity.clone()
@@ -170,7 +140,7 @@ class GraspResidualAction(ActionTerm):
 
     @property
     def action_dim(self):
-        return 9
+        return 6
 
     @property
     def raw_action(self):
@@ -191,11 +161,7 @@ class GraspResidualAction(ActionTerm):
         self._raw_action.copy_(actions)
         self._substep = 0
         self.final_pos, self.final_quat, self.pregrasp = refine_pose(
-            self.task.seed_pos, self.task.seed_quat, actions[:, :6], self.cfg)
-        self.b_final_pos, self.b_final_quat, self.b_delta = refine_b_pose(
-            self.task.b_target_pos, self.task.b_target_quat, self.task.b_nominal_face,
-            actions[:, 6:9], self.cfg.b_rotation_scale)
-        self.values["b_rotation_adjustment"].copy_(self.b_delta.norm(dim=-1))
+            self.task.seed_pos, self.task.seed_quat, actions, self.cfg)
         data = self._env.sim.data
         self.start_pos = data.mocap_pos[:, self.mocap].clone()
         self.start_quat = data.mocap_quat[:, self.mocap].clone()
@@ -231,39 +197,22 @@ class GraspResidualAction(ActionTerm):
         target_quat = self.task.bank["target_quat"][self.task.scene_id]
         impact_hammer = quat_mul(target_quat, quat_box_plus(self.identity, math.pi * self.unit[:, 1]))
         self.impact_quat = quat_mul(impact_hammer, quat_conjugate(self.relative_a_quat))
+        self.raised_quat = quat_box_plus(self.impact_quat, -math.pi / 3 * self.swing_axis)
         pivot = self.target_pos - quat_apply(self.impact_quat, self.tip_offset)
         self.grip_impact = pivot + quat_apply(self.impact_quat, self.grip_offset)
         self.head_impact = pivot + quat_apply(self.impact_quat, self.head_offset)
         self.carry_quat = data.mocap_quat[:, self.mocap].clone()
         self.head_start = data.mocap_pos[:, self.mocap] + quat_apply(self.carry_quat, self.head_offset)
-        self.high_start = self.head_start.clone()
-        self.high_start[:, 2] = 0.75
-        nominal_pos, nominal_quat = self._nominal_swing_pose(0.0)
-        nominal_hammer_pos = nominal_pos + quat_apply(nominal_quat, self.relative_a_pos)
-        nominal_hammer_quat = quat_mul(nominal_quat, self.relative_a_quat)
-        self.b_swing_position_delta = self.b_final_pos - nominal_hammer_pos
-        self.b_swing_rotation_delta = axis_angle_from_quat(
-            quat_mul(self.b_final_quat, quat_conjugate(nominal_hammer_quat)))
-        self.raised_quat = quat_mul(self.task.b_target_quat, quat_conjugate(self.relative_a_quat))
-        self.head_strike = self.task.b_target_pos + quat_apply(self.task.b_target_quat, self.head_local)
-        self.b_mount_pos = self.task.b_target_pos - quat_apply(self.raised_quat, self.relative_a_pos)
-        self.strike_pos, self.strike_quat = self._swing_pose(0.0)
-        self.high_target = self.head_strike.clone()
-        self.high_target[:, 2] = 0.75
+        self.high_start, self.high_target = self.head_start.clone(), self.head_impact.clone()
+        self.high_start[:, 2] = self.high_target[:, 2] = 0.75
+        self.strike_pos = self._swing_pose(0.0)[0]
+        self.head_strike = self.strike_pos + quat_apply(self.raised_quat, self.head_offset)
 
-    def _nominal_swing_pose(self, s):
+    def _swing_pose(self, s):
         quat = quat_box_plus(self.impact_quat, -math.pi / 3 * (1 - s) * self.swing_axis)
         center = (self.grip_impact + (0.30 * (1 - s * s) + 0.10 * s * (1 - s)) * self.unit[:, 2]
                   - 0.40 * (1 - s) * self.horizontal)
         return center - quat_apply(quat, self.grip_offset), quat
-
-    def _swing_pose(self, s):
-        pos, quat = self._nominal_swing_pose(s)
-        hammer_pos = pos + quat_apply(quat, self.relative_a_pos) + (1 - s) * self.b_swing_position_delta
-        hammer_quat = quat_box_plus(quat_mul(quat, self.relative_a_quat),
-                                    (1 - s) * self.b_swing_rotation_delta)
-        mount_quat = quat_mul(hammer_quat, quat_conjugate(self.relative_a_quat))
-        return hammer_pos - quat_apply(mount_quat, self.relative_a_pos), mount_quat
 
     def _swing_progress(self, index):
         distance = 5.0 * (index * self.swing_duration / self.swing_steps)**2
@@ -301,12 +250,7 @@ class GraspResidualAction(ActionTerm):
                     self._write(p0 + s * (p1 - p0) - quat_apply(q, self.head_offset), q)
                     return
                 k -= steps
-            if self._substep <= self.b_adjust_start:
-                self._write(self.b_mount_pos, self.raised_quat)
-            else:
-                s = sampled_progress(self._substep - self.b_adjust_start, 0.5, self.substeps, quintic=True)
-                quat = interpolate_quat(self.raised_quat, self.strike_quat, s)
-                self._write(self.head_strike - quat_apply(quat, self.head_offset), quat)
+            self._write(self.strike_pos, self.raised_quat)
         elif k <= self.swing_end:
             index = (k - self.swing_start - 1) // self.swing_substeps
             if (k - self.swing_start - 1) % self.swing_substeps == 0:
@@ -344,21 +288,9 @@ class GraspResidualAction(ActionTerm):
         # 各项权重由 env_cfg.py 注册；事件每次尝试只计一次，物理子步只更新评分缓存。
         # reset() 会清零评分和状态，因此未满足条件的尝试不会沿用上一回合的结果。
         k, data, values = self._substep, self._env.sim.data, self.values
-        if k in (self.closure_end, self.lift_end, self.b_adjust_start, self.swing_start):
+        if k in (self.closure_end, self.lift_end, self.swing_start):
             # 固定快照刷新 GPU 派生量，对应原脚本阶段结束后的 forward。
             self._env.sim.forward()
-        if k in (self.b_adjust_start, self.swing_start):
-            suffix = "_before" if k == self.b_adjust_start else ""
-            target_pos = self.task.b_target_pos if suffix else self.b_final_pos
-            target_quat = self.task.b_target_quat if suffix else self.b_final_quat
-            pos, quat = data.xpos[:, self.hammer], data.xquat[:, self.hammer]
-            values[f"b_position_error{suffix}"].copy_((pos - target_pos).norm(dim=-1))
-            values[f"b_rotation_error{suffix}"].copy_(quat_error_magnitude(quat, target_quat))
-            values[f"b_face_center_error{suffix}"].copy_(
-                (pos + quat_apply(quat, self.face_local) - self.task.b_nominal_face).norm(dim=-1))
-            if not suffix:
-                values["b_alignment_success"].copy_((values["b_position_error"] < 0.005)
-                    & (values["b_rotation_error"] < math.pi / 60))
         if self.closure_start <= k <= self.closure_end and (k - self.closure_start) % self.enclosure_sample_steps == 0:
             contact = self._env.scene.sensors["palm_contact"].data
             force = contact.force[:, :, 0].abs()

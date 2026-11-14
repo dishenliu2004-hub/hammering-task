@@ -6,7 +6,7 @@ from .env_cfg import make_env_cfg
 from .rl_cfg import ppo_cfg
 
 
-def register_hammer_task(*, data_file="weight/hammer_rl/reset_bank.npz", stage="teacher",
+def register_hammer_task(*, data_file="weight/hammer_rl/reset_bank_ab_256.npz", stage="teacher",
                          hammer_head_extra_mass=0.0):
     register_mjlab_task(task_id=f"Mjlab-Hammer-{stage.title()}",
         env_cfg=make_env_cfg(hammer_head_extra_mass, data_file=data_file, stage=stage),

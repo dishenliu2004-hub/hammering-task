@@ -5,33 +5,6 @@ from dataclasses import asdict
 from mjlab.rl import RslRlOnPolicyRunnerCfg, RslRlModelCfg, RslRlPpoAlgorithmCfg
 
 
-def initialize_expanded_model(model, state):
-    """迁移本项目 51/88 输入、6D 输出的 MLP/CNN；新结构仍严格加载。"""
-    current, expanded = model.state_dict(), {}
-    last = f"mlp.{len(model.mlp) - 1}."
-    for key, value in state.items():
-        target = current[key].clone()
-        if target.shape == value.shape:
-            target = value
-        elif key == "mlp.0.weight":
-            old_dim = state["obs_normalizer._mean"].shape[-1]
-            target.zero_()
-            target[:, :old_dim - 1] = value[:, :old_dim - 1]
-            # 去掉旧观测末列起点标识，追加七维 B 目标，再接 CNN 图像特征。
-            target[:, old_dim + 6:] = value[:, old_dim:]
-        elif key.startswith("obs_normalizer."):
-            target[..., :value.shape[-1] - 1] = value[..., :-1]
-        elif key.startswith(last):
-            target.zero_()
-            target[:6] = value
-        elif key == "distribution.std_param":
-            target[:6] = value
-        else:
-            target = value
-        expanded[key] = target
-    model.load_state_dict(expanded, strict=True)
-
-
 def teacher_model():
     return RslRlModelCfg(hidden_dims=(512, 256, 128), activation="elu", obs_normalization=True,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 0.3, "std_type": "scalar"})

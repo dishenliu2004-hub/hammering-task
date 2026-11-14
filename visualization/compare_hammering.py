@@ -34,8 +34,6 @@ class ComparisonHammeringViewer(ParallelHammeringViewer):
         sdk = torch.stack([start + bank["scores"][start:end].argmax()
                            for start, end in zip(bank["offsets"][scene], bank["offsets"][scene + 1])])
         self.env.unwrapped.hammer.selection = (scene.repeat(2), sdk.repeat(2))
-        task = self.env.unwrapped.hammer
-        task.b_selection = task.b_scenes[torch.randint(len(task.b_scenes), (3,), device=self.env.device)].repeat(2)
         self.env.reset()
         result = select_candidates(self.env.unwrapped, self.actor, self.critic,
                                    torch.arange(3, device=self.env.device))
@@ -91,7 +89,7 @@ def main():
     saved = json.loads((args.checkpoint.parent / "run_config.json").read_text())
     stage = saved["stage"]
     data_file = args.data_file or saved["data_file"]
-    cfg = make_env_cfg(saved["hammer_head_extra_mass"], data_file=data_file, b_pose_file=saved["b_pose_file"], stage=stage,
+    cfg = make_env_cfg(saved["hammer_head_extra_mass"], data_file=data_file, stage=stage,
         num_envs=6, split=args.split, seed=None, training=False)
     cfg.randomize_physics = False
     cfg.events.pop("physics", None)
