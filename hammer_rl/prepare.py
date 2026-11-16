@@ -1,4 +1,4 @@
-"""离线按教师 v1 接触几何采样稳定位姿，缓存 A 初态及 AnyGrasp 候选。"""
+"""离线按教师 v1 接触几何采样稳定位姿，缓存场景初态及视觉观测。"""
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -15,7 +15,6 @@ from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
 from scipy.spatial.transform import Rotation
 
 from generation.enclosure import build_enclosure_geometry
-from generation.grasp_hammer import generate_grasps, candidate_to_mount
 from generation.hammer_generate import (create_simulation, sync_data, sample_legacy_placement,
     support_contacts, SCENE, STABILITY_DURATION, STABILITY_INTERVAL, STABILITY_POSITION,
     STABILITY_ROTATION_DEG)
@@ -26,8 +25,6 @@ STATE_FIELDS = ("qpos", "qvel", "act", "ctrl", "mocap_pos", "mocap_quat", "eq_ac
 MODEL_FIELDS = ("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
                 "dof_invweight0", "body_invweight0", "tendon_length0",
                 "tendon_invweight0", "actuator_acc0")
-# 固定标定工作区：支架及其上方；不依赖本次锤子真值位姿。
-WORKSPACE = ((0.14, -0.16, 0.11), (0.46, 0.41, 0.72))
 
 
 def restore_bank(sim, bank, indices):
@@ -137,7 +134,7 @@ def create_scene(rng, hammer_head_extra_mass=0.0, placement=4):
         del simulation
 
 
-def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0, placement=4):
+def prepare_scene(rng, hammer_head_extra_mass=0.0, placement=4):
     from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
 
     while True:
@@ -184,67 +181,29 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0, placeme
                   support_pos=data.body("support_L_support").xpos.copy(),
                   support_quat=data.body("support_L_support").xquat.copy())
     sample["source_type"] = np.int64(placement)
-    captured, candidates = capture_candidates(model, data, camera, sample, candidates_per_scene, WORKSPACE)
-    sample.update(captured)
+    sample.update(capture_observation(data, camera))
     del simulation
-    return sample, candidates
+    return sample
 
 
-def capture_candidates(model, data, camera, sample, count, workspace):
-    """沿用原相机、SDK、NMS、覆盖采样和一次 30 mm 转换。"""
-    try:
-        frame = camera.capture(data)
-        depth = camera.renderer.render()[::8, ::8].copy()
-        depth[(depth <= 0) | (depth >= camera.far)] = 0
-        captured = dict(depth=depth[None].astype(np.float32),
-                        camera_pos=frame["camera_pos"],
-                        camera_quat=Rotation.from_matrix(frame["camera_rot"]).as_quat()[[3, 0, 1, 2]],
-                        intrinsics=np.array([camera.focal / 8, camera.focal / 8,
-                                             (camera.width - 1) / 16, (camera.height - 1) / 16]))
-        grasps, _ = generate_grasps(model, data, frame, full_scene=False,
-                                   workspace_bounds=workspace, convert_first=False)
-    finally:
-        camera.close()
-    return captured, _prepare_candidates(grasps, sample, min(count, 32))
+def capture_observation(data, camera):
+    """沿用原相机的采集顺序、深度分辨率及相机参数。"""
+    frame = camera.capture(data)
+    depth = camera.renderer.render()[::8, ::8].copy()
+    depth[(depth <= 0) | (depth >= camera.far)] = 0
+    captured = dict(depth=depth[None].astype(np.float32),
+                    camera_pos=frame["camera_pos"],
+                    camera_quat=Rotation.from_matrix(frame["camera_rot"]).as_quat()[[3, 0, 1, 2]],
+                    intrinsics=np.array([camera.focal / 8, camera.focal / 8,
+                                         (camera.width - 1) / 16, (camera.height - 1) / 16]))
+    camera.close()
+    return captured
 
 
-def _select_grasps(grasps, count):
-    """从最高分候选开始，在已有 NMS 结果中按平移和旋转距离覆盖采样。"""
-    order = np.argsort(-grasps["scores"], kind="stable")
-    positions = grasps["translations"][order]
-    rotations = Rotation.from_matrix(grasps["rotations"][order])
-    distances = np.full(len(order), np.inf)
-    selected = []
-    for _ in range(min(count, len(order))):
-        i = distances.argmax()
-        selected.append(order[i])
-        distance = (np.sum((positions - positions[i]) ** 2, axis=1) / 0.03 ** 2
-                    + (rotations[i].inv() * rotations).magnitude() ** 2 / (np.pi / 6) ** 2)
-        distances = np.minimum(distances, distance)
-        distances[i] = -np.inf
-    return np.asarray(selected, dtype=np.int64)
-
-
-def _prepare_candidates(grasps, sample, candidates_per_scene):
-    object_rot = Rotation.from_quat(sample["hammer_quat"][[1, 2, 3, 0]])
-    candidates = []
-    for i in _select_grasps(grasps, candidates_per_scene):
-        pose = candidate_to_mount(grasps, i, extra_depth=0.03)
-        rotation = Rotation.from_quat(pose["mount_quat"][[1, 2, 3, 0]])
-        candidates.append(dict(
-            local_pos=object_rot.inv().apply(pose["mount_pos"] - sample["hammer_pos"]),
-            local_quat=(object_rot.inv() * rotation).as_quat()[[3, 0, 1, 2]],
-            open_ctrl=pose["gripper_open_ctrl"],
-            mount_pos=pose["mount_pos"], mount_quat=pose["mount_quat"],
-            **{name: grasps[name][i] for name in grasps}))
-    return candidates
-
-
-def _prepare_scene_task(index, seed, candidates_per_scene, hammer_head_extra_mass, placements):
+def _prepare_scene_task(index, seed, hammer_head_extra_mass, placements):
     rng = np.random.default_rng(np.random.SeedSequence([seed, index]))
     try:
-        return prepare_scene(rng, min(candidates_per_scene, 32),
-                             hammer_head_extra_mass, int(placements[index]))
+        return prepare_scene(rng, hammer_head_extra_mass, int(placements[index]))
     except Exception as error:
         raise RuntimeError(f"准备场景失败：scene={index}, seed={seed}\n{error}") from error
 
@@ -258,11 +217,8 @@ def stratified_split(sources, seed):
     return split
 
 
-def bank_arrays(scenes, candidates, offsets):
-    arrays = {key: np.stack([sample[key] for sample in scenes]) for key in scenes[0]}
-    arrays.update({key: np.stack([sample[key] for sample in candidates]) for key in candidates[0]})
-    arrays["offsets"] = np.asarray(offsets, dtype=np.int64)
-    return arrays
+def bank_arrays(scenes):
+    return {key: np.stack([scene[key] for scene in scenes]) for key in scenes[0]}
 
 
 def main():
@@ -273,7 +229,6 @@ def main():
     parser.add_argument("--num-scenes", type=int, default=256)
     parser.add_argument("--legacy-per-placement", type=int, default=45)
     parser.add_argument("--random-scenes", type=int, default=76)
-    parser.add_argument("--candidates-per-scene", type=int, default=32)
     parser.add_argument("--seed", type=int, help="随机种子，普通模式默认 42，测试模式默认 43")
     parser.add_argument("--workers", type=int, default=1, help="场景生成进程数（默认串行）")
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
@@ -289,26 +244,23 @@ def main():
     else:
         placements = np.repeat(np.arange(5), [args.legacy_per_placement] * 4 + [args.random_scenes])
     task = partial(_prepare_scene_task, seed=args.seed,
-                   candidates_per_scene=args.candidates_per_scene,
                    hammer_head_extra_mass=args.hammer_head_extra_mass, placements=placements)
-    scenes, candidates, offsets = [], [], [0]
+    scenes = []
     with (ProcessPoolExecutor(max_workers=args.workers, mp_context=get_context("spawn"))
           if args.workers > 1 else nullcontext()) as executor:
         results = (executor.map(task, range(args.num_scenes)) if executor is not None
                    else map(task, range(args.num_scenes)))
-        for index, (sample, seeds) in enumerate(results):
+        for index, sample in enumerate(results):
             scenes.append(sample)
-            candidates.extend(seeds)
-            offsets.append(len(candidates))
-            print(f"scene {index}: candidates={len(seeds)}", flush=True)
-    arrays = bank_arrays(scenes, candidates, offsets)
+            print(f"scene {index}: prepared", flush=True)
+    arrays = bank_arrays(scenes)
     arrays.update(split=(np.ones(args.num_scenes, dtype=np.int64) if args.test_set
                          else stratified_split(placements, args.seed)),
                   hammer_head_extra_mass=np.array(args.hammer_head_extra_mass))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output, **arrays)
-    print(f"saved {output.resolve()}: {len(scenes)} scenes, {len(candidates)} candidates")
+    print(f"saved {output.resolve()}: {len(scenes)} scenes")
 
 
 if __name__ == "__main__":

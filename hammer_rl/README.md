@@ -40,6 +40,14 @@ python -m hammer_rl.prepare --test-set \
   --workers 1
 ```
 
+```bash
+# 生成训练/评估场景，不再依赖anygrasp的预抓取位姿
+python -m hammer_rl.prepare \
+  --output weight/hammer_rl/reset_bank_direct_256.npz \
+  --num-scenes 256 --legacy-per-placement 45 --random-scenes 76 \
+  --seed 42 --workers 2
+```
+
 A 按 `source_type` 保存四类教师 v1（8089d95）姿态各 45 个（0 横躺、1 锤头朝下斜靠、
 2 锤头朝上斜靠、3 倒立），以及按 v1 接触几何扩展的姿态 76 个（4）。
 四类公式使用实际随机化后的锤柄半径、半长计算接触位置。
@@ -168,6 +176,14 @@ python -m hammer_rl.train \
   --device cuda:0 \
   --seed 42 \
   --log-dir weight/hammer_rl/runs/teacher/a_only_no_guide_01
+```
+
+```bash
+python -m hammer_rl.train \
+  --stage teacher \
+  --data-file weight/hammer_rl/reset_bank_direct_256.npz \
+  --num-envs 512 --max-iterations 5000 --device cuda:0 --seed 42 \
+  --log-dir weight/hammer_rl/runs/teacher/direct_grasp_01
 ```
 
 ## 4. 教师向学生蒸馏
@@ -336,9 +352,9 @@ python -m visualization.compare_hammering \
 
 ```bash
 python -m hammer_rl.compare_evaluations \
-  --checkpoint weight/hammer_rl/runs/teacher/a_only_01/model_best.pt \
-  --data-file weight/hammer_rl/reset_bank_stable_v1_256.npz \
-  --output-dir weight/hammer_rl/runs/teacher/a_only_01/comparison_01 \
+  --checkpoint weight/hammer_rl/runs/teacher/20261114_210035/model_best.pt \
+  --data-file weight/hammer_rl/test_bank_v1_128.npz \
+  --output-dir weight/hammer_rl/runs/teacher/20261114_210035/comparison_01 \
   --anygrasp-extra-depth 0.03
 ```
 

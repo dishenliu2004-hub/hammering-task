@@ -18,7 +18,7 @@ from mjlab.sensor import ContactSensorCfg, ContactMatch
 from mjlab.sim import MujocoCfg, SimulationCfg
 
 from generation.hammer_inertia import add_head_mass
-from .mdp.actions import GraspResidualActionCfg, attempt_substeps, collect_attempt
+from .mdp.actions import DirectGraspActionCfg, attempt_substeps, collect_attempt
 from .mdp import observations, rewards, resets, terminations, curriculum
 
 SCENE = Path(__file__).resolve().parents[1] / "assets/scenes/scene.xml"
@@ -66,7 +66,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
     # 使用总场景编译后的物理步长。
     model = mujoco.MjModel.from_xml_path(str(SCENE))
     opt = model.opt
-    action = GraspResidualActionCfg(entity_name="gripper_mount")
+    action = DirectGraspActionCfg(entity_name="gripper_mount")
     # 一个环境 step 完成一次抓取和敲击尝试。
     decimation = attempt_substeps(opt.timestep, action.unload_time)
 
@@ -132,8 +132,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         rewards={name: RewardTermCfg(func=rewards.score, weight=weight, params={"name": name})
                  for name, weight in zip(("capture", "lift_progress", "lift_success", "grasp_before_swing",
                      "wrap", "orientation", "distance", "stability", "force", "task_success", "drop"),
-                     #(2, 3, 10, 5, 3, 2, 5, 30, 10, 100, -30))},
-                     (0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0))},
+                     (2, 3, 10, 5, 3, 2, 5, 30, 10, 100, -30))},
         terminations={"attempt_complete": TerminationTermCfg(func=terminations.attempt_complete)},
         # 子步收集快照和平均力，回合末记录最终指标。
         metrics={"collect": MetricsTermCfg(func=collect_attempt, per_substep=True),

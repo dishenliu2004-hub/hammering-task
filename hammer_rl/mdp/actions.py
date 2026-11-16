@@ -1,4 +1,4 @@
-"""一次 seed 局部 6D 残差，以及 knock_path.py 固定规则的 GPU 批量表达。"""
+"""一次完整 6D 抓取生成，以及 knock_path.py 固定规则的 GPU 批量表达。"""
 
 from dataclasses import dataclass
 import math
@@ -49,32 +49,35 @@ def sampled_progress(substep, duration, substeps, quintic=False):
     return smooth(u0) + fraction * (smooth(u1) - smooth(u0))
 
 
-"""控制6维残差抓取位姿的运动空间的调整范围"""
 @dataclass(kw_only=True)
-class GraspResidualActionCfg(ActionTermCfg):
-    position_scale: float = 0.10
-    rotation_scale: float = math.pi / 5
+class DirectGraspActionCfg(ActionTermCfg):
     unload_time: float = 1.0
 
     def build(self, env):
-        return GraspResidualAction(self, env)
+        return DirectGraspAction(self, env)
 
 
-def refine_pose(seed_pos, seed_quat, actions, cfg):
-    """训练动作项和候选推理共用的局部残差合成。"""
-    delta = torch.tanh(actions)
-    identity = torch.zeros_like(seed_quat)
+def direct_grasp_pose(hammer_pos, hammer_quat, handle_size, tcp_offset, actions):
+    """由锤柄局部抓持中心和完整轴角构造世界系 TCP/mount 位姿。"""
+    a = torch.tanh(actions)
+    radius, half_length = handle_size[:, 0], handle_size[:, 1]
+    local_pos = torch.stack((half_length * a[:, 0], radius * a[:, 1],
+                             radius * a[:, 2]), dim=-1)
+    center = hammer_pos + quat_apply(hammer_quat, local_pos)
+    rotvec = a[:, 3:]
+    rotvec = math.pi * rotvec / rotvec.norm(dim=-1, keepdim=True).clamp_min(1.0)
+    identity = torch.zeros_like(hammer_quat)
     identity[:, 0] = 1
-    final_pos = seed_pos + quat_apply(seed_quat, delta[:, :3] * cfg.position_scale)
-    local_rotation = quat_box_plus(identity, delta[:, 3:] * cfg.rotation_scale)
-    final_quat = quat_mul(seed_quat, local_rotation)
-    approach = torch.zeros_like(seed_pos)
+    local_quat = quat_box_plus(identity, rotvec)
+    final_quat = quat_mul(hammer_quat, local_quat)
+    final_pos = center - quat_apply(final_quat, tcp_offset)
+    approach = torch.zeros_like(final_pos)
     approach[:, 2] = 1
     pregrasp = final_pos - 0.10 * quat_apply(final_quat, approach)
     return final_pos, final_quat, pregrasp
 
 
-class GraspResidualAction(ActionTerm):
+class DirectGraspAction(ActionTerm):
     def __init__(self, cfg, env):
         # 整场景 spec_fn，无虚构 Entity 或机械臂。
         ManagerTermBase.__init__(self, env)
@@ -155,14 +158,19 @@ class GraspResidualAction(ActionTerm):
                       self.impact_started, self.finished, self.returning,
                       self.unloaded, self.return_start, self.palm_frames, self.seat_frames, self.closure_enclosure):
             value[env_ids] = 0
-        # 不清除 reset 事件刚写入的 sample/seed，也不推进其他环境的调度时钟。
+        # 不清除 reset 事件刚写入的场景观测，也不推进其他环境的调度时钟。
 
     def process_actions(self, actions):
         self._raw_action.copy_(actions)
         self._substep = 0
-        self.final_pos, self.final_quat, self.pregrasp = refine_pose(
-            self.task.seed_pos, self.task.seed_quat, actions, self.cfg)
+        bank, scene = self.task.bank, self.task.scene_id
         data = self._env.sim.data
+        tcp_center_world = 0.5 * (data.site_xpos[:, self.narrow] + data.site_xpos[:, self.wide])
+        tcp_offset = quat_apply_inverse(data.xquat[:, self.base],
+            tcp_center_world - data.xpos[:, self.base])
+        self.final_pos, self.final_quat, self.pregrasp = direct_grasp_pose(
+            bank["hammer_pos"][scene], bank["hammer_quat"][scene],
+            bank["handle_size"][scene], tcp_offset, actions)
         self.start_pos = data.mocap_pos[:, self.mocap].clone()
         self.start_quat = data.mocap_quat[:, self.mocap].clone()
         self.lifted_pos = self.final_pos + 0.25 * self.unit[:, 2]
@@ -225,8 +233,8 @@ class GraspResidualAction(ActionTerm):
         self._substep += 1
         k, data = self._substep, self._env.sim.data
         if k <= self.lift_end:
-            boundaries = ((1.0, self.start_pos, self.pregrasp, self.start_quat, self.final_quat, self.task.open_ctrl),
-                (0.6, self.pregrasp, self.final_pos, self.final_quat, self.final_quat, self.task.open_ctrl),
+            boundaries = ((1.0, self.start_pos, self.pregrasp, self.start_quat, self.final_quat, 0.0),
+                (0.6, self.pregrasp, self.final_pos, self.final_quat, self.final_quat, 0.0),
                 (0.8, self.final_pos, self.final_pos, self.final_quat, self.final_quat, 1.0),
                 (0.8, self.final_pos, self.lifted_pos, self.final_quat, self.final_quat, 1.0))
             for duration, p0, p1, q0, q1, grip in boundaries:
