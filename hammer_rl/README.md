@@ -10,79 +10,45 @@ conda activate hammer
 
 export MUJOCO_GL=glfw
 export MPLBACKEND=Agg
-export OMP_NUM_THREADS=2
-export OPENBLAS_NUM_THREADS=1
 ```
 
 ## 2. 准备 A 场景和测试集
 
 按顺序生成 256 个训练/评估场景和 128 个独立测试场景。
-生成过程中已在相机采集和 AnyGrasp 之前完成每个待保存状态的恢复复核。
+两者复用现有 `hammer_rl.prepare`，缓存场景初态、锤柄几何、深度及相机参数，
+不调用 AnyGrasp，也不保存候选或预抓取位姿；执行时由 `direct_grasp_pose` 根据 actor 输出构造抓取和预抓取位姿。
+生成过程中在相机采集之前完成每个待保存状态的恢复复核。
 以下命令使用单进程生成，降低显存和内存峰值；不要同时运行两次生成命令。
 每份 NPZ 仅在该次全部场景生成完成后写出，中断后需从头生成。
 
 ```bash
 # 生成训练/评估缓存：四类各 45 个，扩展来源 76 个。
 python -m hammer_rl.prepare \
-  --output weight/hammer_rl/reset_bank_v1_256.npz \
+  --output weight/hammer_rl/reset_bank_direct_256.npz \
   --num-scenes 256 \
   --legacy-per-placement 45 \
   --random-scenes 76 \
-  --candidates-per-scene 32 \
   --seed 42 \
   --workers 1
 
 # 独立生成测试集：128 个场景，使用独立种子 43。
 python -m hammer_rl.prepare --test-set \
-  --output weight/hammer_rl/test_bank_v1_128.npz \
-  --candidates-per-scene 32 \
+  --output weight/hammer_rl/test_bank_direct_128.npz \
   --seed 43 \
   --workers 1
 ```
 
-```bash
-# 生成训练/评估场景，不再依赖anygrasp的预抓取位姿
-python -m hammer_rl.prepare \
-  --output weight/hammer_rl/reset_bank_direct_256.npz \
-  --num-scenes 256 --legacy-per-placement 45 --random-scenes 76 \
-  --seed 42 --workers 2
-```
-
-A 按 `source_type` 保存四类教师 v1（8089d95）姿态各 45 个（0 横躺、1 锤头朝下斜靠、
-2 锤头朝上斜靠、3 倒立），以及按 v1 接触几何扩展的姿态 76 个（4）。
-四类公式使用实际随机化后的锤柄半径、半长计算接触位置。
-锤头朝上斜靠使用 v1 的顶部支撑分支，倾角由锤柄尺寸及底板、挡板高度联动求解，
-使锤柄落在底板、锤头由挡板顶面支撑，避免板面侧靠产生慢滑。
-来源 4 等概率选择横躺、锤头朝上斜靠、倒立，在原支架局部
-`x∈[0.12,0.42]`、`y∈[-0.10,0.10]` 和角度边界内，按底板与锤体投影求可行平移范围；
-位置与角度由接触关系联动，不再独立随机转角后抬高下落。
-锤头朝下斜靠的 v1 局部 x 小于 0.12，仍由来源 1 保留。
-所有来源先沉降 2 s，再观察 30 s，每 20 ms 比较相对观察起点的累计位姿变化：
-位移 ≤3 mm、转角 ≤2°，且各采样点均有 GPU 有效支架接触，才将窗口末态确定为待保存状态 S。
-随后快照保存全部 `STATE_FIELDS`、锤柄尺寸、模型参考位姿及实际锤子位姿，
-释放初筛仿真，按缓存恢复流程重建单场景仿真，从 S 再复核 30 s，采用相同的稳定条件。
-未通过时沿用原重采样流程，不采图或调用 AnyGrasp；通过后再次恢复同一个 S，时间归零，
-同步 CPU 数据，再执行可见性筛选、采图和候选生成，最终保存 S。
-保存真实速度及完整状态，不冻结物体或清零速度，也不保存复核推进后的末态。
-支架两块板的 `solref/solimp` 恢复为 v1 默认软度，生成、检查与训练共用同一模型。
-同一场景保留原锤柄形态随机化、可见性筛选、深度、AnyGrasp SDK/NMS 和覆盖采样。
-分层划分 train/eval：四类各 36/9，随机来源 61/15，总计 205/51。
-`--num-scenes` 应等于 `4 * --legacy-per-placement + --random-scenes`；小规模测试可用 4/1/0。
-
-A 缓存保留 `offsets` 和候选字段：原始 `translations/rotations/depths/widths/scores`、
-`local_pos/local_quat/open_ctrl` 与转换后的 `mount_pos/mount_quat`。候选沿接近方向
-在 SDK 原深度上额外深入 30 mm，reset 不重复叠加。
-所有位置以米计，四元数为 wxyz。未指定 `--output` 时，脚本仍默认使用历史文件名
-`reset_bank_ab_256.npz` 和 `test_bank_ab_128.npz`，二者实际只包含 A 场景。
-旧缓存不会因脚本更新而自动改变，需要重新生成。上面的命令通过 `--output` 写入
-`reset_bank_stable_v1_256.npz` 和 `test_bank_stable_v1_128.npz`，保留旧缓存；
-后续带 `--data-file` 的正式训练和评估示例也使用新训练缓存路径。
+`--test-set` 固定生成 128 个场景，四类原始摆放各为 23、23、22、22 个，扩展来源为 38 个。
+每个场景使用 `SeedSequence([43, scene_index])` 独立采样，不从训练缓存抽取；
+全部保存为 `split=1`，评估时使用 `--split eval --episodes 0` 覆盖全部 128 个场景。
+测试模式忽略 `--num-scenes`、`--legacy-per-placement` 和 `--random-scenes`。
+旧缓存不会自动更新，上述测试命令生成新的 `test_bank_direct_128.npz`。
 
 可视化查看生成后的训练/评估缓存：
 
 ```bash
 python -m visualization.hammer_reset_bank \
-  --data-file weight/hammer_rl/reset_bank_stable_v1_256.npz \
+  --data-file weight/hammer_rl/reset_bank_direct_256.npz \
   --scene-index 135 --wait-time 30
 ```
 
@@ -90,17 +56,17 @@ python -m visualization.hammer_reset_bank \
 
 ```bash
 python -m hammer_rl.check_reset_bank \
-  --data-file weight/hammer_rl/reset_bank_stable_v1_256.npz \
+  --data-file weight/hammer_rl/reset_bank_direct_256.npz \
   --duration 30
 
 python -m hammer_rl.check_reset_bank \
-  --data-file weight/hammer_rl/test_bank_stable_v1_128.npz \
+  --data-file weight/hammer_rl/test_bank_direct_128.npz \
   --duration 30
 ```
 
 独立复查各覆盖缓存中的全部场景，使用与生成时相同的 MuJoCo Warp 后端额外仿真 30 s，
 不重新采样或改写原 NPZ。每 20 ms 记录位姿、速度及有效支架接触，分别输出至 bank 同目录的
-`reset_bank_stable_v1_256_stability_30s/` 和 `test_bank_stable_v1_128_stability_30s/`
+`reset_bank_direct_256_stability_30s/` 和 `test_bank_direct_128_stability_30s/`
 （`summary.json`、逐场景 `scenes.csv`、`traces.npz`）。
 累计漂移以相对缓存超过 3 mm 或 2° 计；`passes_stability` 同时要求全程有效支架接触，
 `fails_stability` 应为 0。另外保留最后 0.5 s 的历史 5 mm / 3° 判定及
@@ -170,12 +136,12 @@ q_eval = 0
 ```bash
 python -m hammer_rl.train \
   --stage teacher \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --num-envs 512 \
+  --data-file weight/hammer_rl/reset_bank_direct_256.npz \
+  --num-envs 2048 \
   --max-iterations 5000 \
   --device cuda:0 \
   --seed 42 \
-  --log-dir weight/hammer_rl/runs/teacher/a_only_no_guide_01
+  --log-dir weight/hammer_rl/runs/teacher/direct_01
 ```
 
 ```bash
@@ -352,9 +318,9 @@ python -m visualization.compare_hammering \
 
 ```bash
 python -m hammer_rl.compare_evaluations \
-  --checkpoint weight/hammer_rl/runs/teacher/20261114_210035/model_best.pt \
+  --checkpoint weight/hammer_rl/runs/teacher/direct_01/model_best.pt \
   --data-file weight/hammer_rl/test_bank_v1_128.npz \
-  --output-dir weight/hammer_rl/runs/teacher/20261114_210035/comparison_01 \
+  --output-dir weight/hammer_rl/runs/teacher/direct_01/comparison_01 \
   --anygrasp-extra-depth 0.03
 ```
 

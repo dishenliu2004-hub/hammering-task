@@ -43,6 +43,7 @@ class HammerEnvCfg(ManagerBasedRlEnvCfg):
     stability_rotation_scale: float = math.pi / 36  # 相对旋转尺度，5°
     impact_window_s: float = 0.04  # 首次有效命中后的冲量积分窗口，s
     impulse_scale: float = 1.0  # 保留原法向冲量尺度，N·s；逐场景 SGS 不使用
+    force_ref_n: float = 10.0  # 三次力度奖励的参考力，N
 
 
 def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
@@ -68,7 +69,8 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
     opt = model.opt
     action = DirectGraspActionCfg(entity_name="gripper_mount")
     # 一个环境 step 完成一次抓取和敲击尝试。
-    decimation = attempt_substeps(opt.timestep, action.unload_time)
+    decimation = attempt_substeps(
+        opt.timestep, action.unload_time, action.num_strikes, action.recover_time)
 
     sensors = (
         # 指面与锤柄接触：抓持判定。
@@ -131,8 +133,9 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         # 一次抓姿决策的阶段、质量、冲量与完整成功奖励。
         rewards={name: RewardTermCfg(func=rewards.score, weight=weight, params={"name": name})
                  for name, weight in zip(("capture", "lift_progress", "lift_success", "grasp_before_swing",
-                     "wrap", "orientation", "distance", "stability", "force", "task_success", "drop"),
-                     (2, 3, 10, 5, 3, 2, 5, 30, 10, 100, -30))},
+                     "wrap", "orientation", "distance", "stability", "force",
+                     "hit_progress", "recovery_hold", "task_success", "drop"),
+                     (2, 3, 10, 5, 3, 2, 5, 30, 20, 30, 20, 100, -30))},
         terminations={"attempt_complete": TerminationTermCfg(func=terminations.attempt_complete)},
         # 子步收集快照和平均力，回合末记录最终指标。
         metrics={"collect": MetricsTermCfg(func=collect_attempt, per_substep=True),
@@ -141,7 +144,9 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                         "impact_impulse", "task_success", "drop",
                         "translation_drift", "rotation_drift", "mean_force", "valid_strike",
                         "lift_height", "grasp_before_swing",
-                        "seat_closure", "seat_lift", "seat_before_swing", "peak_force")}},
+                        "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
+                        "hit_progress", "recovery_hold", "hit_count",
+                        "strike_force_1", "strike_force_2", "strike_force_3")}},
         # 仅教师训练启用逐场景 SGS。
         curriculum={"scene_sgs": CurriculumTermCfg(func=curriculum.SceneSgsCurriculum,
                                                    params=curriculum.SGS_PARAMS.copy())}

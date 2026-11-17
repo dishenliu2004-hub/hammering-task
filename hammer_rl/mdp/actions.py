@@ -27,10 +27,17 @@ def swing_schedule(physics_dt):
     return s, length, duration, steps, round(duration / steps / physics_dt)
 
 
-def attempt_substeps(physics_dt, unload_time):
+def attempt_substeps(physics_dt, unload_time, num_strikes=3, recover_time=0.8):
     *_, steps, substeps = swing_schedule(physics_dt)
-    return (round(16.2 / DT) * round(DT / physics_dt) + steps * substeps
-            + round(unload_time / physics_dt) + round(0.45 / DT) * round(DT / physics_dt))
+    swing_len = steps * substeps
+    recover_len = round(recover_time / physics_dt)
+    return (
+        round(16.2 / DT) * round(DT / physics_dt)
+        + num_strikes * swing_len
+        + (num_strikes - 1) * recover_len
+        + round(unload_time / physics_dt)
+        + round(0.45 / DT) * round(DT / physics_dt)
+    )
 
 
 def interpolate_quat(start, end, s):
@@ -52,6 +59,8 @@ def sampled_progress(substep, duration, substeps, quintic=False):
 @dataclass(kw_only=True)
 class DirectGraspActionCfg(ActionTermCfg):
     unload_time: float = 1.0
+    num_strikes: int = 3
+    recover_time: float = 0.8
 
     def build(self, env):
         return DirectGraspAction(self, env)
@@ -116,7 +125,14 @@ class DirectGraspAction(ActionTerm):
         self.closure_enclosure = torch.zeros(env.num_envs, device=self.device)
         self.lift_end = round(3.2 / env.physics_dt)
         self.swing_start = round(16.2 / env.physics_dt)
-        self.swing_end = self.swing_start + self.swing_steps * self.swing_substeps
+        self.swing_len = self.swing_steps * self.swing_substeps
+        self.recovery_steps = round(cfg.recover_time / env.physics_dt)
+        self.cycle_steps = self.swing_len + self.recovery_steps
+        self.swing_end = (
+            self.swing_start
+            + cfg.num_strikes * self.swing_len
+            + (cfg.num_strikes - 1) * self.recovery_steps
+        )
         self.unload_end = self.swing_end + round(cfg.unload_time / env.physics_dt)
         self.return_steps = round(0.45 / DT) * self.substeps
         self.on_physics_step = None  # 仅评估安装，训练路径没有 CPU 同步。
@@ -126,13 +142,21 @@ class DirectGraspAction(ActionTerm):
             "impact_impulse", "task_success", "drop",
             "translation_drift", "rotation_drift", "mean_force",
             "valid_strike", "lift_height", "grasp_before_swing",
-            "seat_closure", "seat_lift", "seat_before_swing", "peak_force")}
+            "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
+            "hit_progress", "recovery_hold", "hit_count",
+            "strike_force_1", "strike_force_2", "strike_force_3")}
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         self.relative_closure_pos = torch.zeros((env.num_envs, 3), device=self.device)
         self.relative_closure_quat = self.identity.clone()
         self.dropped = torch.zeros_like(self.grasp_valid)
         self.lost_contact_steps = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
-        self.first_hit_step = torch.zeros_like(self.lost_contact_steps)
+        self.strike_hits = torch.zeros(
+            (env.num_envs, cfg.num_strikes), dtype=torch.bool, device=self.device)
+        self.strike_first_hit_step = torch.zeros(
+            (env.num_envs, cfg.num_strikes), dtype=torch.long, device=self.device)
+        self.strike_impulse = torch.zeros((env.num_envs, cfg.num_strikes), device=self.device)
+        self.recovery_ok = torch.zeros(
+            (env.num_envs, cfg.num_strikes - 1), dtype=torch.bool, device=self.device)
         self.impact_started = torch.zeros_like(self.grasp_valid)
         self.finished = torch.zeros_like(self.grasp_valid)
         self.returning = torch.zeros_like(self.grasp_valid)
@@ -154,7 +178,7 @@ class DirectGraspAction(ActionTerm):
         for value in self.values.values():
             value[env_ids] = 0
         for value in (self.grasp_valid, self.dropped, self.lost_contact_steps,
-                      self.first_hit_step,
+                      self.strike_hits, self.strike_first_hit_step, self.strike_impulse, self.recovery_ok,
                       self.impact_started, self.finished, self.returning,
                       self.unloaded, self.return_start, self.palm_frames, self.seat_frames, self.closure_enclosure):
             value[env_ids] = 0
@@ -260,13 +284,22 @@ class DirectGraspAction(ActionTerm):
                 k -= steps
             self._write(self.strike_pos, self.raised_quat)
         elif k <= self.swing_end:
-            index = (k - self.swing_start - 1) // self.swing_substeps
-            if (k - self.swing_start - 1) % self.swing_substeps == 0:
-                self.swing_p0, self.swing_q0 = self._swing_pose(self._swing_progress(index))
-                self.swing_p1, self.swing_q1 = self._swing_pose(self._swing_progress(index + 1))
-            u = ((k - self.swing_start - 1) % self.swing_substeps + 1) / self.swing_substeps
-            self._write(self.swing_p0 + u * (self.swing_p1 - self.swing_p0),
-                        interpolate_quat(self.swing_q0, self.swing_q1, u))
+            elapsed = k - self.swing_start - 1
+            phase = elapsed % self.cycle_steps
+            if phase < self.swing_len:
+                index = phase // self.swing_substeps
+                if phase % self.swing_substeps == 0:
+                    self.swing_p0, self.swing_q0 = self._swing_pose(self._swing_progress(index))
+                    self.swing_p1, self.swing_q1 = self._swing_pose(self._swing_progress(index + 1))
+                u = (phase % self.swing_substeps + 1) / self.swing_substeps
+                self._write(self.swing_p0 + u * (self.swing_p1 - self.swing_p0),
+                            interpolate_quat(self.swing_q0, self.swing_q1, u))
+            else:
+                j = phase - self.swing_len + 1
+                u = j / self.recovery_steps
+                h = 10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5
+                p, q = self._swing_pose(1.0 - h)
+                self._write(p, q)
         else:
             if k == self.swing_end + 1:
                 data.eq_active[:, self.weld] = False
@@ -387,20 +420,24 @@ class DirectGraspAction(ActionTerm):
             p, q = self._relative_pose()
             values["translation_drift"].copy_((p - self.relative_closure_pos).norm(dim=-1))
             values["rotation_drift"].copy_(quat_error_magnitude(self.relative_closure_quat, q))
+            x = torch.sqrt(0.5 * ((values["translation_drift"] / self._env.cfg.stability_position_scale).square()
+                + (values["rotation_drift"] / self._env.cfg.stability_rotation_scale).square()))
+            b, c = math.sqrt(26.0) / 3.0, math.sqrt(10.0)
+            # 三个给分节点间线性插值，末段接分数和斜率连续的指数衰减。
+            score = torch.where(x <= 1.0, 1.0 - 0.1 * x,
+                torch.where(x <= b, 0.9 - 0.15 * (x - 1.0) / (b - 1.0),
+                    torch.where(x <= c, 0.75 - 0.25 * (x - b) / (c - b),
+                        0.5 * torch.exp(-(x - c) / (2.0 * (c - b))))))
+            values["stability"].copy_(score * self.grasp_valid.float())
 
-        if self.lift_end < k <= self.unload_end:
-            # 两点误差保持不变；本帧提前卸载结束仍按实时抓持条件评分，撤离后冻结。
-            holding = self.grasp_valid & ~self.dropped & bilateral
-            if k >= self.swing_start:
-                x = torch.sqrt(0.5 * ((values["translation_drift"] / self._env.cfg.stability_position_scale).square()
-                    + (values["rotation_drift"] / self._env.cfg.stability_rotation_scale).square()))
-                b, c = math.sqrt(26.0) / 3.0, math.sqrt(10.0)
-                # 三个给分节点间线性插值，末段接分数和斜率连续的指数衰减。
-                score = torch.where(x <= 1.0, 1.0 - 0.1 * x,
-                    torch.where(x <= b, 0.9 - 0.15 * (x - 1.0) / (b - 1.0),
-                        torch.where(x <= c, 0.75 - 0.25 * (x - b) / (c - b),
-                            0.5 * torch.exp(-(x - c) / (2.0 * (c - b))))))
-                values["stability"].copy_(torch.where(evaluating, score * holding, values["stability"]))
+        for i in range(self.cfg.num_strikes - 1):
+            if k == self.swing_start + (i + 1) * self.cycle_steps:
+                pos_error = (data.xpos[:, self.base] - self.strike_pos).norm(dim=-1)
+                rot_error = quat_error_magnitude(data.xquat[:, self.base], self.raised_quat)
+                ready = (self.grasp_valid & ~self.dropped & bilateral
+                         & (pos_error < 0.03) & (rot_error < math.radians(10.0)))
+                self.recovery_ok[:, i].copy_(ready)
+                values["recovery_hold"].copy_(self.recovery_ok.float().mean(dim=-1))
         if self.swing_start < k <= self.unload_end:
             # 挥击和卸载期间保留原控制计算；实时有效命中、冲量及终局保持另行评分。
             # head_contact 仅匹配锤头与目标端盖；netforce 给出这些接触的世界系合力。
@@ -409,25 +446,52 @@ class DirectGraspAction(ActionTerm):
             # self.normal 是目标端面外法向；只保留压缩法向分量，切向力和负投影不计分。
             force = (-(contact.force[:, 0] * self.normal).sum(-1)).clamp_min(0)
             touching = contact.found[:, 0] > 0
-            # impact_started 保留原条件，继续服务提前卸载控制。
-            active = ~self.finished & self.grasp_valid
-            self.impact_started |= active & touching & (force > 0)
-            # touch 连续为 0 的物理子步数用于判断卸载；重新非零即清零计数。
-            # 挥击结束后，已经有效命中、连续至少 3 步 touch=0 且锤头接触消失，才提前结束计分。
-            # 未提前满足条件的环境由固定 unload_end 时窗终止，之后执行撤离。
-            self.unloaded = torch.where(data.sensordata[:, self.touch_address] == 0, self.unloaded + 1, 0)
-            self.finished |= (k > self.swing_end) & self.impact_started & (self.unloaded >= 3) & ~touching
-            hit = evaluating & holding & touching & (force > 0)
-            values["peak_force"].copy_(torch.maximum(values["peak_force"], torch.where(hit, force, 0)))
-            self.first_hit_step.copy_(torch.where(hit & (self.first_hit_step == 0), k, self.first_hit_step))
-            values["valid_strike"].copy_(torch.maximum(values["valid_strike"], hit.float()))
+            holding = self.grasp_valid & ~self.dropped & bilateral
+            if k <= self.swing_end:
+                strike_id = (k - self.swing_start - 1) // self.cycle_steps
+            else:
+                strike_id = self.cfg.num_strikes - 1
+            strike_start = self.swing_start + strike_id * self.cycle_steps
+            strike_end = strike_start + self.swing_len
             window_steps = round(self._env.cfg.impact_window_s / self._env.physics_dt)
-            in_window = ((self.first_hit_step > 0) & (k - self.first_hit_step >= 0)
-                         & (k - self.first_hit_step < window_steps))
-            values["impact_impulse"].add_(torch.where(evaluating & holding & in_window, force * self._env.physics_dt, 0))
-            values["mean_force"].copy_(values["impact_impulse"] / (window_steps * self._env.physics_dt))
-            values["force"].copy_(torch.where(evaluating, values["mean_force"], values["force"]))
-            values["task_success"].copy_(torch.where(evaluating, holding & (values["valid_strike"] > 0), values["task_success"]))
+            score_end = (strike_end + window_steps
+                         if strike_id < self.cfg.num_strikes - 1 else self.unload_end)
+            scoring = strike_start < k <= score_end
+            hit = scoring & ~self.returning & holding & touching & (force > 0)
+            self.strike_hits[:, strike_id] |= hit
+            values["valid_strike"].copy_(self.strike_hits.any(dim=-1).float())
+            values["hit_count"].copy_(self.strike_hits.sum(dim=-1).float())
+            values["hit_progress"].copy_(self.strike_hits.float().mean(dim=-1))
+            values["peak_force"].copy_(torch.maximum(values["peak_force"], torch.where(hit, force, 0)))
+            first = self.strike_first_hit_step[:, strike_id]
+            first = torch.where(hit & (first == 0), torch.full_like(first, k), first)
+            self.strike_first_hit_step[:, strike_id].copy_(first)
+            in_window = ((first > 0) & (k >= first) & (k - first < window_steps))
+            self.strike_impulse[:, strike_id].add_(torch.where(
+                ~self.returning & holding & touching & in_window,
+                force * self._env.physics_dt, 0.0))
+            actual_window_s = window_steps * self._env.physics_dt
+            per_strike_mean_force = self.strike_impulse / actual_window_s
+            values["impact_impulse"].copy_(self.strike_impulse.sum(dim=-1))
+            values["mean_force"].copy_(per_strike_mean_force.mean(dim=-1))
+            values["strike_force_1"].copy_(per_strike_mean_force[:, 0])
+            values["strike_force_2"].copy_(per_strike_mean_force[:, 1])
+            values["strike_force_3"].copy_(per_strike_mean_force[:, 2])
+            f = torch.log1p(per_strike_mean_force / self._env.cfg.force_ref_n)
+            force_reward = 0.5 * f.mean(dim=-1) + 0.5 * f.min(dim=-1).values
+            values["force"].copy_(torch.where(~self.returning, force_reward, values["force"]))
+
+            # 仅第三次挥击及最终卸载的接触参与原提前卸载逻辑。
+            if strike_id == self.cfg.num_strikes - 1:
+                active = ~self.finished & self.grasp_valid
+                self.impact_started |= active & touching & (force > 0)
+            if k > self.swing_end:
+                # touch 连续为 0 的物理子步数仅在最终卸载时累计，重新非零即清零。
+                self.unloaded = torch.where(data.sensordata[:, self.touch_address] == 0, self.unloaded + 1, 0)
+                self.finished |= self.impact_started & (self.unloaded >= 3) & ~touching
+                all_hits = self.strike_hits.all(dim=-1)
+                values["task_success"].copy_(torch.where(
+                    ~self.returning, (all_hits & holding).float(), values["task_success"]))
         if self.on_physics_step is not None:
             # 评估/回放时安装的逐子步回调，可用于显示或捕获最终指标。
             self.on_physics_step(self)
