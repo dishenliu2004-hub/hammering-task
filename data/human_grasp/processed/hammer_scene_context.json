@@ -1,0 +1,72 @@
+{
+  "task_id": "hammer",
+  "profile_id": "default",
+  "scene_id": 0,
+  "data_file": "/home/ubuntu20/CodeMujoco/hammering-task/weight/hammer_rl/reset_bank_direct_256.npz",
+  "rgb": "hammer_scene_context.rgb.png",
+  "depth": "hammer_scene_context.depth.npy",
+  "depth_unit": "m",
+  "depth_invalid": 0,
+  "width": 160,
+  "height": 120,
+  "rgb_width": 1280,
+  "rgb_height": 960,
+  "rgb_intrinsics": [
+    1158.8225099390856,
+    1158.8225099390856,
+    639.5,
+    479.5
+  ],
+  "camera_frame": "optical: x right, y down, z forward",
+  "camera_pos": [
+    0.0,
+    -0.7,
+    0.7
+  ],
+  "camera_quat": [
+    -0.4617486164108694,
+    0.8870108315249865,
+    0.0,
+    0.0
+  ],
+  "intrinsics": [
+    144.8528137423857,
+    144.8528137423857,
+    79.9375,
+    59.9375
+  ],
+  "physics": {
+    "handle_size": [
+      0.02568489012138991,
+      0.04969439219876026
+    ],
+    "tool_mass_kg": 0.253442,
+    "tool_inertia_kg_m2": [
+      0.00349644,
+      0.00345287,
+      8.947e-05
+    ],
+    "handle_friction": [
+      1.0,
+      0.5,
+      0.01
+    ],
+    "tool_pos": [
+      0.28371581089467235,
+      0.039249061388351096,
+      0.1485891935899854
+    ],
+    "tool_quat_wxyz": [
+      -0.019038387518614405,
+      0.7594430751156493,
+      -0.6500355033966088,
+      -0.018373888632907013
+    ],
+    "target_pos": [
+      -0.3700013811161803,
+      0.1000004113344087,
+      0.09976677520785322
+    ],
+    "trajectory": "single 6D grasp, lift, fixed three-strike trajectory, unload"
+  }
+}

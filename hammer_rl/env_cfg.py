@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from functools import partial
+import json
 import math
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from mjlab.sensor import ContactSensorCfg, ContactMatch
 from mjlab.sim import MujocoCfg, SimulationCfg
 
 from generation.hammer_inertia import add_head_mass
-from .mdp.actions import DirectGraspActionCfg, attempt_substeps, collect_attempt
+from .mdp.actions import GraspResidualActionCfg, attempt_substeps, collect_attempt
 from .mdp import observations, rewards, resets, terminations, curriculum
 
 SCENE = Path(__file__).resolve().parents[1] / "assets/scenes/scene.xml"
@@ -29,6 +30,7 @@ class HammerEnvCfg(ManagerBasedRlEnvCfg):
     data_file: str = "weight/hammer_rl/reset_bank_ab_256.npz"
     stage: str = "teacher"  # teacher / distill / student
     split: str = "train"
+    reward_recipe: dict | None = None
 
     randomize_physics: bool = False
     visual_noise: bool = False
@@ -63,11 +65,11 @@ def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
 
 def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/reset_bank_ab_256.npz",
                  stage="teacher", num_envs=128, split="train", seed=42,
-                 training=True) -> HammerEnvCfg:
+                 training=True, reward_recipe=None) -> HammerEnvCfg:
     # 使用总场景编译后的物理步长。
     model = mujoco.MjModel.from_xml_path(str(SCENE))
     opt = model.opt
-    action = DirectGraspActionCfg(entity_name="gripper_mount")
+    action = GraspResidualActionCfg(entity_name="gripper_mount")
     # 一个环境 step 完成一次抓取和敲击尝试。
     decimation = attempt_substeps(
         opt.timestep, action.unload_time, action.num_strikes, action.recover_time)
@@ -152,4 +154,10 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                                                    params=curriculum.SGS_PARAMS.copy())}
                    if stage == "teacher" and training else {},
     )
+    if reward_recipe is not None:
+        cfg.reward_recipe = json.loads(Path(reward_recipe).read_text())
+        cfg.rewards = {"recipe": RewardTermCfg(func=rewards.recipe, weight=1.0)}
+        cfg.metrics.update({name: MetricsTermCfg(func=rewards.score,
+            params={"name": name}, reduce="last") for name in ("prior_region", "prior_axis")})
+        cfg.metrics["recipe"] = MetricsTermCfg(func=rewards.recipe, reduce="last")
     return cfg

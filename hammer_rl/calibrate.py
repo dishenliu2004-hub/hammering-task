@@ -34,7 +34,8 @@ def main():
     actor, critic = load_models(args.checkpoint, args.device)
     actor.requires_grad_(False)
     cfg = make_env_cfg(config["hammer_head_extra_mass"], data_file=data_file,
-        stage=config["stage"], num_envs=args.num_envs, split="train", seed=args.seed, training=False)
+        stage=config["stage"], num_envs=args.num_envs, split="train", seed=args.seed, training=False,
+        reward_recipe=config.get("reward_recipe"))
     env = ManagerBasedRlEnv(cfg, device=args.device)
     try:
         wrapper = RslRlVecEnvWrapper(env)

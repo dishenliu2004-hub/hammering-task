@@ -1,0 +1,22 @@
+{
+  "method": "Official OpenAI SDK with local HTTP MockTransport; CLI through runpy",
+  "network_calls": 0,
+  "real_vlm_called": false,
+  "user_requested_no_actual_vlm": true,
+  "results": {
+    "mapping_vlm": {
+      "passed": true,
+      "http_requests_intercepted": 1,
+      "images": 2,
+      "strict_schema": true,
+      "mapping_prior_preserved": true
+    },
+    "vlm_only": {
+      "passed": true,
+      "http_requests_intercepted": 1,
+      "images": 2,
+      "strict_schema": true,
+      "mapping_prior_preserved": true
+    }
+  }
+}

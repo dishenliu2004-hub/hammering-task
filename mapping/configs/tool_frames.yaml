@@ -1,0 +1,21 @@
+# ContactPose 原始物体系，单位 m。每个对象显式给出：
+# work_end: 把手靠工作端的轴心（不是锤头/刀尖）
+# free_end: 把手自由端轴心
+# transverse_point: 定义规范 +Y 的轴外点；锤子对应 hammer_Object 的 +Y。
+# 标定对象：官方 sample/full28_use 注册接触网格（m），不是 3Dmodels 中的 mm 打印模型。
+# 轴向工作端截面由网格可视化选定：hammer x=-0.01，knife y=-0.02，flashlight z=0.035。
+# 自由端取网格对应轴的极值；横向中心取把手截面中心的毫米级近似。
+# hammer 的平头朝源 +Y，对应本地 +Z；源 -Z 对应本地 +Y。
+contactpose:
+  hammer:
+    work_end: [-0.01, 0.0, 0.01193]
+    free_end: [0.11409574002027512, 0.0, 0.01193]
+    transverse_point: [-0.01, 0.0, 0.00193]
+  knife:
+    work_end: [0.0, -0.02, 0.00783]
+    free_end: [0.0, -0.09659456461668015, 0.00783]
+    transverse_point: [0.01, -0.02, 0.00783]
+  flashlight:
+    work_end: [0.00025, -0.0003, 0.035]
+    free_end: [0.00025, -0.0003, 0.13934175670146942]
+    transverse_point: [0.01025, -0.0003, 0.035]

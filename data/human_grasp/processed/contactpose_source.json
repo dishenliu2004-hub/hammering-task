@@ -1,0 +1,111 @@
+{
+  "dataset": "ContactPose",
+  "repository": "https://github.com/facebookresearch/ContactPose",
+  "commit": "89cec790f2c7bdb3c81f4d9e98b337387ce6dda8",
+  "download": "https://drive.google.com/file/d/1paUAxXgHp6wDFBFw9MI1mxGElEl2KPew/view",
+  "participant": 28,
+  "intent": "use",
+  "objects": [
+    "hammer",
+    "knife",
+    "flashlight"
+  ],
+  "selection": "Only grasps, full28_use contact maps, marker locations and object models; no RGB-D images",
+  "loader_edit": "utilities/misc.py: replace removed np.int aliases with equivalent builtin int for NumPy 1.26",
+  "object_model_units": "mm (printing models); registered contact-map vertices and hand joints are m",
+  "files": [
+    {
+      "path": "data/human_grasp/source/contactpose/data/contactpose_data/full28_use/flashlight/annotations.json",
+      "bytes": 448506,
+      "sha256": "6b7e88dcee292b761289a97364030639f50d57eb4becc71f29023deffa195225"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/contactpose_data/full28_use/flashlight/flashlight.ply",
+      "bytes": 3567990,
+      "sha256": "3a102517b51e46bf9ba439afa01168eb5ce830f9de70e25c59f4a7bffbc76fd1"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/contactpose_data/full28_use/hammer/annotations.json",
+      "bytes": 545359,
+      "sha256": "9ba0e8d83d264ff9d0159ac0edf6fa2412650a604123fe3121b27626a8f39146"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/contactpose_data/full28_use/hammer/hammer.ply",
+      "bytes": 2768345,
+      "sha256": "8a8e3ace4078610010d3fefdefb1097e81fbc86c3cb3f4f5464274ccb6a22eb3"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/contactpose_data/full28_use/knife/annotations.json",
+      "bytes": 569954,
+      "sha256": "a5a4c0539f072b619039bcd88a1e0f075a333fbd683964a2f1f9a2d46c1e3b89"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/contactpose_data/full28_use/knife/knife.ply",
+      "bytes": 1535942,
+      "sha256": "2fbe677eb4afc01760d68d0aab90937204e4715ea21285eb061f097953a4f19f"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_marker_locations/flashlight_final_marker_locations.txt",
+      "bytes": 1391,
+      "sha256": "ed2112eba42df90af02173256c0f5cd5561d4512e15ad365c9c18d0dee9b7fc8"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_marker_locations/hammer_final_marker_locations.txt",
+      "bytes": 1405,
+      "sha256": "b9982ac67f1e211a411d352a0cf7811593b2845b768ed97e557c64fb5d3921f1"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_marker_locations/knife_final_marker_locations.txt",
+      "bytes": 1536,
+      "sha256": "a82f36c3766f6dd5c71a9eb3d136d9134a6ec6d138f39218166a8de157f04b3e"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_models/README.txt",
+      "bytes": 703,
+      "sha256": "61569dbac67e81057ba486270257fec0872223b89b17dc9e536ef68d64283258"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_models/flashlight.ply",
+      "bytes": 2316856,
+      "sha256": "1e5425276d3d178488cd3c32aba9d79b53c2149f20af7e3d66af246b41d68c1e"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_models/hammer.ply",
+      "bytes": 1797606,
+      "sha256": "a3bd68d9969477c8ce0a30ed513a80342cb56e5dc9c53369cc8c57e6d74e6a05"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_models/knife.ply",
+      "bytes": 996852,
+      "sha256": "82a634d56f9c4f293dea588ec655c789d2961c450f62e0291e613702860d867d"
+    },
+    {
+      "path": "data/human_grasp/source/contactpose/data/object_models/licenses.json",
+      "bytes": 12760,
+      "sha256": "04810cbaf04afb57c0d52f458bb639aa6c06412426403825d65a84f46a77f93b"
+    }
+  ],
+  "downloaded_archives": [
+    {
+      "name": "3Dmodels.zip",
+      "bytes": 122322664,
+      "sha256": "346b703c2dc69515b06b5de6fad05d6a95276434c7239bf56b31bb8d0708c855"
+    },
+    {
+      "name": "full28_use_contact_maps.zip",
+      "bytes": 96769202,
+      "sha256": "d1db5a5e83352401620fdeb0d4576ff1c1ecb183f7236db97a007ebf7a4217dd"
+    },
+    {
+      "name": "grasps.zip",
+      "bytes": 125421218,
+      "sha256": "acc240d4dfb31ac380b9ff5b184c3783a2ec8180cec5ed9f27949c9d0c84929b"
+    },
+    {
+      "name": "markers.zip",
+      "bytes": 91639,
+      "sha256": "55e055854b0b9e947fd43da4b1100654b38891c1a4b7500d53c86fd3d7733d00"
+    }
+  ],
+  "archive_retention": "Removed after extracting the required use subset; no handoff or unrelated object data retained"
+}

@@ -81,6 +81,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=("teacher", "distill", "student"), required=True)
     parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank_ab_256.npz")
+    parser.add_argument("--reward-recipe", type=Path, help="离线 RewardRecipe JSON；省略时沿用原奖励")
     parser.add_argument("--num-envs", type=int, default=128)
     parser.add_argument("--max-iterations", type=int, default=5000, help="本次追加的 update 数")
     parser.add_argument("--device", default="cuda:0")
@@ -107,6 +108,7 @@ def main():
             config["scene_sgs"] = SGS_PARAMS.copy()
             config["data_file"] = str(Path(args.data_file).resolve())
         args.data_file = config["data_file"]
+        args.reward_recipe = config.get("reward_recipe")
     else:
         stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
         run_dir = args.log_dir or Path("weight/hammer_rl/runs") / args.stage / stamp
@@ -116,10 +118,14 @@ def main():
         if args.stage == "teacher":
             config["scene_sgs"] = SGS_PARAMS.copy()
         config["rl"] = distill_cfg() if args.stage == "distill" else asdict(ppo_cfg(args.stage))
+        if args.reward_recipe is not None:
+            recipe = json.loads(args.reward_recipe.read_text())
+            config.update(reward_recipe=str(args.reward_recipe.resolve()),
+                          recipe_id=recipe["recipe_id"], recipe_version=recipe["version"])
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     env_cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=args.stage,
-        num_envs=args.num_envs, seed=args.seed)
+        num_envs=args.num_envs, seed=args.seed, reward_recipe=args.reward_recipe)
     if args.stage == "teacher":
         env_cfg.curriculum["scene_sgs"].params = config["scene_sgs"]
     env = _RewardLogVecEnvWrapper(ManagerBasedRlEnv(env_cfg, device=args.device))

@@ -1,4 +1,4 @@
-"""一次完整 6D 抓取生成，以及 knock_path.py 固定规则的 GPU 批量表达。"""
+"""一次 seed 局部 6D 残差，以及 knock_path.py 固定规则的 GPU 批量表达。"""
 
 from dataclasses import dataclass
 import math
@@ -57,36 +57,32 @@ def sampled_progress(substep, duration, substeps, quintic=False):
 
 
 @dataclass(kw_only=True)
-class DirectGraspActionCfg(ActionTermCfg):
+class GraspResidualActionCfg(ActionTermCfg):
+    position_scale: float = 0.10
+    rotation_scale: float = math.pi / 5
     unload_time: float = 1.0
     num_strikes: int = 3
     recover_time: float = 0.8
 
     def build(self, env):
-        return DirectGraspAction(self, env)
+        return GraspResidualAction(self, env)
 
 
-def direct_grasp_pose(hammer_pos, hammer_quat, handle_size, tcp_offset, actions):
-    """由锤柄局部抓持中心和完整轴角构造世界系 TCP/mount 位姿。"""
-    a = torch.tanh(actions)
-    radius, half_length = handle_size[:, 0], handle_size[:, 1]
-    local_pos = torch.stack((half_length * a[:, 0], radius * a[:, 1],
-                             radius * a[:, 2]), dim=-1)
-    center = hammer_pos + quat_apply(hammer_quat, local_pos)
-    rotvec = a[:, 3:]
-    rotvec = math.pi * rotvec / rotvec.norm(dim=-1, keepdim=True).clamp_min(1.0)
-    identity = torch.zeros_like(hammer_quat)
+def refine_pose(seed_pos, seed_quat, actions, cfg):
+    """训练动作项和候选推理共用的局部残差合成。"""
+    delta = torch.tanh(actions)
+    identity = torch.zeros_like(seed_quat)
     identity[:, 0] = 1
-    local_quat = quat_box_plus(identity, rotvec)
-    final_quat = quat_mul(hammer_quat, local_quat)
-    final_pos = center - quat_apply(final_quat, tcp_offset)
-    approach = torch.zeros_like(final_pos)
+    final_pos = seed_pos + quat_apply(seed_quat, delta[:, :3] * cfg.position_scale)
+    local_rotation = quat_box_plus(identity, delta[:, 3:] * cfg.rotation_scale)
+    final_quat = quat_mul(seed_quat, local_rotation)
+    approach = torch.zeros_like(seed_pos)
     approach[:, 2] = 1
     pregrasp = final_pos - 0.10 * quat_apply(final_quat, approach)
     return final_pos, final_quat, pregrasp
 
 
-class DirectGraspAction(ActionTerm):
+class GraspResidualAction(ActionTerm):
     def __init__(self, cfg, env):
         # 整场景 spec_fn，无虚构 Entity 或机械臂。
         ManagerTermBase.__init__(self, env)
@@ -145,6 +141,12 @@ class DirectGraspAction(ActionTerm):
             "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
             "hit_progress", "recovery_hold", "hit_count",
             "strike_force_1", "strike_force_2", "strike_force_3")}
+        if env.cfg.reward_recipe is not None:
+            prior = env.cfg.reward_recipe["mapping_prior"]
+            self.prior_u = self._raw_action.new_tensor([prior["u_mean_RL"], prior["u_sigma_RL"]])
+            self.prior_axis = self._raw_action.new_tensor(prior["closing_axis_O"])
+            self.values.update({name: torch.zeros(env.num_envs, device=self.device)
+                                for name in ("prior_region", "prior_axis")})
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         self.relative_closure_pos = torch.zeros((env.num_envs, 3), device=self.device)
         self.relative_closure_quat = self.identity.clone()
@@ -182,19 +184,14 @@ class DirectGraspAction(ActionTerm):
                       self.impact_started, self.finished, self.returning,
                       self.unloaded, self.return_start, self.palm_frames, self.seat_frames, self.closure_enclosure):
             value[env_ids] = 0
-        # 不清除 reset 事件刚写入的场景观测，也不推进其他环境的调度时钟。
+        # 不清除 reset 事件刚写入的场景及候选观测，也不推进其他环境的调度时钟。
 
     def process_actions(self, actions):
         self._raw_action.copy_(actions)
         self._substep = 0
-        bank, scene = self.task.bank, self.task.scene_id
+        self.final_pos, self.final_quat, self.pregrasp = refine_pose(
+            self.task.seed_pos, self.task.seed_quat, actions, self.cfg)
         data = self._env.sim.data
-        tcp_center_world = 0.5 * (data.site_xpos[:, self.narrow] + data.site_xpos[:, self.wide])
-        tcp_offset = quat_apply_inverse(data.xquat[:, self.base],
-            tcp_center_world - data.xpos[:, self.base])
-        self.final_pos, self.final_quat, self.pregrasp = direct_grasp_pose(
-            bank["hammer_pos"][scene], bank["hammer_quat"][scene],
-            bank["handle_size"][scene], tcp_offset, actions)
         self.start_pos = data.mocap_pos[:, self.mocap].clone()
         self.start_quat = data.mocap_quat[:, self.mocap].clone()
         self.lifted_pos = self.final_pos + 0.25 * self.unit[:, 2]
@@ -257,8 +254,8 @@ class DirectGraspAction(ActionTerm):
         self._substep += 1
         k, data = self._substep, self._env.sim.data
         if k <= self.lift_end:
-            boundaries = ((1.0, self.start_pos, self.pregrasp, self.start_quat, self.final_quat, 0.0),
-                (0.6, self.pregrasp, self.final_pos, self.final_quat, self.final_quat, 0.0),
+            boundaries = ((1.0, self.start_pos, self.pregrasp, self.start_quat, self.final_quat, self.task.open_ctrl),
+                (0.6, self.pregrasp, self.final_pos, self.final_quat, self.final_quat, self.task.open_ctrl),
                 (0.8, self.final_pos, self.final_pos, self.final_quat, self.final_quat, 1.0),
                 (0.8, self.final_pos, self.lifted_pos, self.final_quat, self.final_quat, 1.0))
             for duration, p0, p1, q0, q1, grip in boundaries:
@@ -406,6 +403,12 @@ class DirectGraspAction(ActionTerm):
 
             # 沿柄轴投影评分。
             center = (data.site_xpos[:, self.wide] + data.site_xpos[:, self.narrow]) / 2
+            if self._env.cfg.reward_recipe is not None:
+                center_o = quat_apply_inverse(data.xquat[:, self.hammer], center - data.xpos[:, self.hammer])
+                u = center_o[:, 0] / self.task.bank["handle_size"][self.task.scene_id, 1]
+                axis_o = quat_apply_inverse(data.xquat[:, self.hammer], axis)
+                values["prior_region"].copy_(torch.exp(-0.5 * ((u - self.prior_u[0]) / self.prior_u[1]).square()) * lift)
+                values["prior_axis"].copy_((axis_o * self.prior_axis).sum(-1).square() * lift)
             head = data.xpos[:, self.hammer] + quat_apply(data.xquat[:, self.hammer], self.head_local)
             distance = ((center - head) * handle_axis).sum(-1)
             values["distance"].copy_((distance / self._env.cfg.distance_ref).clamp(0, 1) * lift)

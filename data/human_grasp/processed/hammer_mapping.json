@@ -1,0 +1,331 @@
+{
+  "version": "1.0",
+  "task_id": "hammer",
+  "source": {
+    "dataset": "ContactPose",
+    "intent": "use",
+    "source_objects": [
+      "hammer"
+    ],
+    "sample_count": 1,
+    "records": [
+      {
+        "participant_id": 28,
+        "object_name": "hammer",
+        "intent": "use",
+        "annotation": "/home/ubuntu20/CodeMujoco/hammering-task/data/human_grasp/source/contactpose/utilities/../data/contactpose_data/full28_use/hammer/annotations.json",
+        "contact_map": "/home/ubuntu20/CodeMujoco/hammering-task/data/human_grasp/source/contactpose/utilities/../data/contactpose_data/full28_use/hammer/hammer.ply",
+        "frame_count": 586
+      }
+    ],
+    "aggregation": "equal record weight; mean joints over frames"
+  },
+  "coordinates": {
+    "frame": "tool_canonical",
+    "length_unit": "m",
+    "u_zero": "working_end",
+    "u_one": "free_end",
+    "source_frame": {
+      "work_end": [
+        -0.01,
+        0.0,
+        0.01193
+      ],
+      "free_end": [
+        0.11409574002027512,
+        0.0,
+        0.01193
+      ],
+      "transverse_point": [
+        -0.01,
+        0.0,
+        0.00193
+      ]
+    },
+    "canonical_origin_in_source": [
+      -0.01,
+      0.0,
+      0.01193
+    ],
+    "canonical_axes_in_source": [
+      [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    ],
+    "handle_length_m": 0.12409574002027511,
+    "target": "hammer_Object: +X working-to-free; +Y transverse; u_RL=x/handle_half_length"
+  },
+  "hand_grasp": {
+    "closing_axis_O": [
+      -0.6270292299302179,
+      0.5479054094307111,
+      -0.5537454353127281
+    ],
+    "approach_axis_O": [
+      -0.7581602460565128,
+      -0.26591875221001854,
+      0.5953824472745186
+    ]
+  },
+  "contact_prior": {
+    "u_mean": 0.5064525182057528,
+    "u_std": 0.23639695129221713,
+    "u_interval": [
+      0.18870694014028497,
+      0.8414580703934866
+    ],
+    "contact_hotspots": [
+      {
+        "position_O": [
+          0.10058652558295753,
+          -0.0032333100338527744,
+          -0.0159940170539328
+        ],
+        "normal_O": [
+          0.1903271128615611,
+          -0.012890164300465388,
+          -0.9816361004843341
+        ],
+        "strength": 0.019599872411172285
+      },
+      {
+        "position_O": [
+          0.10059202281861569,
+          0.003252030238576252,
+          -0.015992942903394692
+        ],
+        "normal_O": [
+          0.1895986004973073,
+          0.01440578379943315,
+          -0.9817560002783718
+        ],
+        "strength": 0.01900756526293127
+      },
+      {
+        "position_O": [
+          0.10066765579470931,
+          -0.009049325944725626,
+          -0.013670269405563575
+        ],
+        "normal_O": [
+          0.1364592309567446,
+          -0.6960130108607723,
+          -0.7049430948659732
+        ],
+        "strength": 0.01894184243317735
+      },
+      {
+        "position_O": [
+          0.06975328948837801,
+          0.00902419597906162,
+          -0.013116956530904403
+        ],
+        "normal_O": [
+          -0.06447279790154556,
+          0.7201255105398652,
+          -0.6908418830676415
+        ],
+        "strength": 0.017672053756891307
+      }
+    ],
+    "angular_coverage": 1.0,
+    "coverage_definition": "fraction of angular bins with measured intensity above threshold"
+  },
+  "gripper": {
+    "name": "omnipicker",
+    "type": "underactuated_two_finger",
+    "actuator_count": 1,
+    "actuators": [
+      {
+        "name": "gripper_actuator",
+        "ctrlrange": [
+          0.0,
+          1.0
+        ]
+      }
+    ],
+    "supported_modes": [
+      "envelope",
+      "lateral"
+    ],
+    "contact_parts": [
+      "proximal",
+      "distal",
+      "tip",
+      "base"
+    ],
+    "collision_geoms": [
+      "base_collision_part1",
+      "base_collision_part2",
+      "hand_narrow1_collision",
+      "hand_narrow2_geom",
+      "hand_narrow_fingertip_proximal",
+      "hand_narrow_fingertip_distal",
+      "hand_narrow_fingertip_tip",
+      "hand_narrow_loop_collision",
+      "hand_wide1_collision",
+      "hand_wide2_geom",
+      "hand_wide_fingertip_proximal",
+      "hand_wide_fingertip_distal",
+      "hand_wide_fingertip_tip",
+      "hand_wide_loop_collision"
+    ],
+    "contact_sites": [
+      "hand_narrow_contact_tip",
+      "hand_wide_contact_tip"
+    ],
+    "reference_rotation": [
+      [
+        0.00900455728270977,
+        -0.9999594581522504,
+        0.0
+      ],
+      [
+        0.9999594581522504,
+        0.00900455728270977,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "passive_springs": [
+      {
+        "name": "hand_narrow2_joint",
+        "stiffness": 0.2,
+        "springref": -0.24
+      },
+      {
+        "name": "hand_wide2_joint",
+        "stiffness": 0.2,
+        "springref": 0.24
+      }
+    ],
+    "equalities": [
+      {
+        "name": "narrow_closed_loop",
+        "type": 0,
+        "data": [
+          9.9595e-05,
+          -0.011911627,
+          0.105469996,
+          0.03169959622749546,
+          -0.011233451820361607,
+          0.105441890327243,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "name": "wide_closed_loop",
+        "type": 0,
+        "data": [
+          -9.995e-05,
+          0.011911685,
+          0.105470004,
+          0.03150004877273923,
+          0.011233491490170907,
+          0.10549798328599837,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "name": "symmetric_driver",
+        "type": 2,
+        "data": [
+          0.0,
+          -1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    ],
+    "source_xml": "/home/ubuntu20/CodeMujoco/hammering-task/assets/grippers/omnipicker/ominipicker.xml"
+  },
+  "mapped_grasp": {
+    "preferred_closing_axis_O": [
+      -0.6270292299302179,
+      0.5479054094307111,
+      -0.5537454353127281
+    ],
+    "preferred_approach_axis_O": [
+      -0.7581602460565128,
+      -0.26591875221001854,
+      0.5953824472745186
+    ],
+    "preferred_u_RL": 0.012905036411505533,
+    "u_sigma_RL": 0.47279390258443427,
+    "mode_preference": [
+      "envelope",
+      "lateral"
+    ],
+    "rotation_candidates_OG": [
+      [
+        [
+          0.17330859227373613,
+          -0.6286152823020006,
+          -0.7581602460565128
+        ],
+        [
+          0.7980514627971594,
+          0.540741231968102,
+          -0.26591875221001854
+        ],
+        [
+          0.5771290969717346,
+          -0.5589648887953474,
+          0.5953824472745186
+        ]
+      ],
+      [
+        [
+          -0.17330859227373613,
+          0.6286152823020006,
+          -0.7581602460565128
+        ],
+        [
+          -0.7980514627971594,
+          -0.540741231968102,
+          -0.26591875221001854
+        ],
+        [
+          -0.5771290969717346,
+          0.5589648887953474,
+          0.5953824472745186
+        ]
+      ]
+    ]
+  },
+  "task_context": {
+    "tool_working_end": "hammer_head",
+    "primary_load_type": "impact"
+  }
+}

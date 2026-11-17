@@ -26,3 +26,6 @@ MUJOCO_LOG.TXT
 
 # 权重、本地运行库和授权文件
 /weight/
+
+# ContactPose 原始子集（离线 JSON 产物可单独保留）
+/data/human_grasp/source/
