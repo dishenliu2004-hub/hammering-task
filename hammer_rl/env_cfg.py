@@ -145,7 +145,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
                     for name in ("capture", "lift_progress", "lift_success", "wrap", "orientation", "distance", "stability", "force",
                         "impact_impulse", "task_success", "drop",
                         "translation_drift", "rotation_drift", "mean_force", "valid_strike",
-                        "lift_height", "grasp_before_swing",
+                        "lift_height", "grasp_before_swing", "hold_fraction",
                         "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
                         "hit_progress", "recovery_hold", "hit_count",
                         "strike_force_1", "strike_force_2", "strike_force_3")}},

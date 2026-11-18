@@ -9,6 +9,7 @@ import time
 import mujoco
 import numpy as np
 import torch
+from PIL import Image
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.utils.lab_api.math import quat_apply
@@ -26,6 +27,46 @@ def candidate_batches(env, pairs, episodes):
         env.hammer.selection = selected.unbind(-1)
         env.reset()
         yield first, selected
+
+
+@torch.no_grad()
+def save_feedback(env, wrapper, data, rows, actions, directory):
+    """从本次评价选取阶段进展最低和最高的尝试，按原场景、候选和动作回放。"""
+    progress = ("task_success", "hit_progress", "grasp_before_swing", "lift_success", "hold_fraction", "capture")
+    ranked = sorted(range(len(rows)), key=lambda i: tuple(rows[i][name] for name in progress))
+    indices = [ranked[0], ranked[-1]] if len(ranked) > 1 else ranked
+    pairs = [(rows[i]["scene_id"], rows[i]["candidate_id"]) for i in indices]
+    term = env.action_manager.get_term("grasp")
+    stages = {getattr(term, stage): stage for stage in ("closure_end", "lift_end", "swing_start", "swing_end")}
+    directory.mkdir(parents=True, exist_ok=True)
+    index = []
+    with mujoco.Renderer(env.sim.mj_model, height=240, width=320) as renderer:
+        for first, _ in candidate_batches(env, pairs, len(indices)):
+            batch = indices[first:first + env.num_envs]
+            batch_frames = {episode: [] for episode in batch}
+
+            def capture(grasp):
+                stage = stages.get(grasp._substep)
+                if stage:
+                    for env_id, episode in enumerate(batch):
+                        row = rows[episode]
+                        sync_data(env, data, env_id)
+                        renderer.update_scene(data, camera="fixed")
+                        filename = f"episode_{episode}_{stage}.png"
+                        Image.fromarray(renderer.render()).save(directory / filename)
+                        batch_frames[episode].append(dict(episode=episode, scene_id=row["scene_id"],
+                                                          candidate_id=row["candidate_id"], stage=stage, file=filename))
+                if grasp._substep == env.cfg.decimation:
+                    for env_id, episode in enumerate(batch):
+                        outcome = {key: float(grasp.values[key][env_id]) for key in
+                                   ("task_success", "hold_fraction", "hit_progress")}
+                        index.extend(dict(frame, **outcome) for frame in batch_frames[episode])
+
+            term.on_physics_step = capture
+            replay = [indices[i % len(indices)] for i in range(first, first + env.num_envs)]
+            wrapper.step(actions[replay])
+    term.on_physics_step = None
+    (directory / "index.json").write_text(json.dumps(index, indent=2))
 
 
 def main():
@@ -46,6 +87,7 @@ def main():
     parser.add_argument("--grasp-depth-offset", type=float, default=0.0,
                         help="相对缓存抓姿沿接近方向的深度偏移（米）")
     parser.add_argument("--output", type=Path, help="逐样本原始指标 npz，建议放在 weight/ 下")
+    parser.add_argument("--feedback-dir", type=Path, help="输出代表性尝试的阶段关键帧和索引")
     args = parser.parse_args()
     if args.episodes < 0 or args.num_envs < 1:
         parser.error("episodes 必须非负，num-envs 必须为正")
@@ -94,6 +136,7 @@ def main():
               f"scenes={len(set(s for s, _ in pairs))}, candidates={candidate_count}, "
               f"episodes={args.episodes}", flush=True)
         rows = []
+        actions = []
         model, data = env.sim.mj_model, mujoco.MjData(env.sim.mj_model)
         if args.viewer:
             from mujoco import viewer as mj_viewer
@@ -134,6 +177,8 @@ def main():
                         if term._substep == env.cfg.decimation:
                             captured.update({key: value.clone() for key, value in term.values.items()})
                     term.on_physics_step = capture
+                    if args.feedback_dir:
+                        actions.append(action.clone())
                     _, reward, done, _ = wrapper.step(action)
                     term.on_physics_step = callback
                 for i in range(min(count, args.episodes - first)):
@@ -142,6 +187,8 @@ def main():
                     if args.selection == "learned":
                         rows[-1]["predicted_score"] = float(result["score"][i])
                 print(f"Evaluated {len(rows)}/{args.episodes} episodes", flush=True)
+        if args.feedback_dir:
+            save_feedback(env, wrapper, data, rows, torch.cat(actions), args.feedback_dir)
         for name in rows[0]:
             if name in ("scene_id", "candidate_id"):
                 continue

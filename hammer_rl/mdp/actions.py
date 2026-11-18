@@ -140,7 +140,7 @@ class GraspResidualAction(ActionTerm):
             "capture", "lift_progress", "lift_success", "wrap", "orientation", "distance", "stability", "force",
             "impact_impulse", "task_success", "drop",
             "translation_drift", "rotation_drift", "mean_force",
-            "valid_strike", "lift_height", "grasp_before_swing",
+            "valid_strike", "lift_height", "grasp_before_swing", "hold_fraction",
             "seat_closure", "seat_lift", "seat_before_swing", "peak_force",
             "hit_progress", "recovery_hold", "hit_count",
             "strike_force_1", "strike_force_2", "strike_force_3")}
@@ -149,12 +149,13 @@ class GraspResidualAction(ActionTerm):
             self.prior_u = self._raw_action.new_tensor([prior["u_mean_RL"], prior["u_sigma_RL"]])
             self.prior_axis = self._raw_action.new_tensor(prior["closing_axis_O"])
             self.values.update({name: torch.zeros(env.num_envs, device=self.device)
-                                for name in ("prior_region", "prior_axis")})
+                                for name in ("prior_region", "prior_axis", "grasp_u_rl", "grasp_axis_cos2")})
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         self.relative_closure_pos = torch.zeros((env.num_envs, 3), device=self.device)
         self.relative_closure_quat = self.identity.clone()
         self.dropped = torch.zeros_like(self.grasp_valid)
         self.lost_contact_steps = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
+        self.hold_steps = torch.zeros_like(self.lost_contact_steps)
         self.strike_hits = torch.zeros(
             (env.num_envs, cfg.num_strikes), dtype=torch.bool, device=self.device)
         self.strike_first_hit_step = torch.zeros(
@@ -182,7 +183,7 @@ class GraspResidualAction(ActionTerm):
         self._raw_action[env_ids] = 0
         for value in self.values.values():
             value[env_ids] = 0
-        for value in (self.grasp_valid, self.dropped, self.lost_contact_steps,
+        for value in (self.grasp_valid, self.dropped, self.lost_contact_steps, self.hold_steps,
                       self.strike_hits, self.strike_first_hit_step, self.strike_impulse, self.recovery_ok,
                       self.impact_started, self.finished, self.returning,
                       self.unloaded, self.return_start, self.palm_frames, self.seat_frames, self.closure_enclosure):
@@ -378,6 +379,8 @@ class GraspResidualAction(ActionTerm):
                     torch.where(lost, self.lost_contact_steps + 1, 0), self.lost_contact_steps))
                 self.dropped |= evaluating & (self.lost_contact_steps >= self.substeps)
                 values["drop"].copy_(self.dropped)
+                if k <= self.swing_start:
+                    self.hold_steps += (bilateral & ~self.dropped).long()
         if k == self.lift_end:
             # 抬升结束快照（当前为尝试开始后约 3.2 s）。A 的抬升和几何评分在此写入，
             # wrap 在挥击前追加顶靠奖励；保存夹爪系下的锤子位姿，用于规划后续挥击轨迹。
@@ -416,7 +419,10 @@ class GraspResidualAction(ActionTerm):
                 u = center_o[:, 0] / self.task.bank["handle_size"][self.task.scene_id, 1]
                 axis_o = quat_apply_inverse(data.xquat[:, self.hammer], axis)
                 values["prior_region"].copy_(torch.exp(-0.5 * ((u - self.prior_u[0]) / self.prior_u[1]).square()) * lift)
-                values["prior_axis"].copy_((axis_o * self.prior_axis).sum(-1).square() * lift)
+                cos2 = (axis_o * self.prior_axis).sum(-1).square()
+                values["prior_axis"].copy_(cos2 * lift)
+                values["grasp_u_rl"].copy_(u)
+                values["grasp_axis_cos2"].copy_(cos2.clamp(0, 1))
             head = data.xpos[:, self.hammer] + quat_apply(data.xquat[:, self.hammer], self.head_local)
             distance = ((center - head) * handle_axis).sum(-1)
             values["distance"].copy_((distance / self._env.cfg.distance_ref).clamp(0, 1) * lift)
@@ -424,6 +430,7 @@ class GraspResidualAction(ActionTerm):
             self._plan_strike()
         if k == self.swing_start:
             # 挥击前快照（当前约 16.2 s）：需已有效抬升、未锁存掉落且当前双侧有效接触。
+            values["hold_fraction"].copy_(self.hold_steps.float() / (self.swing_start - self.lift_end))
             self.grasp_valid.copy_((values["lift_success"] > 0) & bilateral & ~self.dropped)
             values["grasp_before_swing"].copy_(self.grasp_valid)
             values["wrap"].add_(0.25 * self.grasp_valid * values["seat_before_swing"] / 1.5)

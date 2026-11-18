@@ -39,11 +39,11 @@ class _RewardLogVecEnvWrapper(RslRlVecEnvWrapper):
         return obs, reward, done, extras
 
 
-def _enable_best_checkpoint(runner, stage, run_dir):
+def _enable_best_checkpoint(runner, stage, run_dir, *, recipe_changed=False):
     best_path = run_dir / "model_best.pt"
     best_score = (
         torch.load(best_path, map_location="cpu", weights_only=False)["infos"]["best_score"]
-        if best_path.exists() else float("-inf")
+        if not recipe_changed and best_path.exists() else float("-inf")
     )
     log = runner.logger.log
 
@@ -82,6 +82,7 @@ def main():
     parser.add_argument("--stage", choices=("teacher", "distill", "student"), required=True)
     parser.add_argument("--data-file", default="weight/hammer_rl/reset_bank_ab_256.npz")
     parser.add_argument("--reward-recipe", type=Path, help="离线 RewardRecipe JSON；省略时沿用原奖励")
+    parser.add_argument("--reward-recipe-override", type=Path, help="本次续训采用的配方")
     parser.add_argument("--num-envs", type=int, default=128)
     parser.add_argument("--max-iterations", type=int, default=5000, help="本次追加的 update 数")
     parser.add_argument("--device", default="cuda:0")
@@ -97,9 +98,12 @@ def main():
     parser.add_argument("--hammer-head-extra-mass", type=float, default=0.0)
     parser.add_argument("--log-dir", type=Path)
     args = parser.parse_args()
+    recipe_changed = False
     if args.resume:
-        run_dir = args.resume.resolve().parent
-        config = json.loads((run_dir / "run_config.json").read_text())
+        run_dir = args.log_dir or args.resume.resolve().parent
+        config = json.loads((args.resume.resolve().parent / "run_config.json").read_text())
+        if args.log_dir:
+            config["seed"] = args.seed
         args.stage = config["stage"]
         args.hammer_head_extra_mass = config["hammer_head_extra_mass"]
         if args.stage == "teacher" and args.reset_scene_sgs:
@@ -108,7 +112,7 @@ def main():
             config["scene_sgs"] = SGS_PARAMS.copy()
             config["data_file"] = str(Path(args.data_file).resolve())
         args.data_file = config["data_file"]
-        args.reward_recipe = config.get("reward_recipe")
+        args.reward_recipe = args.reward_recipe_override or config.get("reward_recipe")
     else:
         stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
         run_dir = args.log_dir or Path("weight/hammer_rl/runs") / args.stage / stamp
@@ -118,10 +122,11 @@ def main():
         if args.stage == "teacher":
             config["scene_sgs"] = SGS_PARAMS.copy()
         config["rl"] = distill_cfg() if args.stage == "distill" else asdict(ppo_cfg(args.stage))
-        if args.reward_recipe is not None:
-            recipe = json.loads(args.reward_recipe.read_text())
-            config.update(reward_recipe=str(args.reward_recipe.resolve()),
-                          recipe_id=recipe["recipe_id"], recipe_version=recipe["version"])
+    if args.reward_recipe is not None and (not args.resume or args.reward_recipe_override):
+        recipe = json.loads(args.reward_recipe.read_text())
+        recipe_changed = args.resume is not None and config.get("reward_recipe") != str(args.reward_recipe.resolve())
+        config.update(reward_recipe=str(args.reward_recipe.resolve()),
+                      recipe_id=recipe["recipe_id"], recipe_version=recipe["version"])
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     env_cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=args.data_file, stage=args.stage,
@@ -156,7 +161,7 @@ def main():
             runner.alg.actor.load_state_dict(checkpoint[actor_key], strict=True)
             if "critic_state_dict" in checkpoint:
                 runner.alg.critic.load_state_dict(checkpoint["critic_state_dict"], strict=True)
-        _enable_best_checkpoint(runner, args.stage, run_dir)
+        _enable_best_checkpoint(runner, args.stage, run_dir, recipe_changed=recipe_changed)
         runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)
         checkpoint = run_dir / f"model_{runner.current_learning_iteration}.pt"
         runner.save(str(checkpoint), infos={"env_state": {"common_step_counter": env.unwrapped.common_step_counter}})

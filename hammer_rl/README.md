@@ -1,550 +1,81 @@
-# 锤击任务强化学习操作指南
+# 从零训练 VLM 引导的锤击 Teacher
 
-训练流程：**准备 A 场景 → 教师 PPO → 教师向学生蒸馏 → 学生 PPO 微调 → 固定 actor 校准评分器**。
+**准备场景 → VLM 生成奖励 → 从零训练 Teacher → 按反馈修订奖励并续训 → 独立测试。**
 
-## 1. 激活运行环境
+VLM 负责定奖励。Teacher 用 PPO 学习如何微调 AnyGrasp 给出的初始抓姿，每个回合只决策一次，随后由 MuJoCo 执行固定轨迹。目标是三次有效命中且结束时仍持有锤子，同时尽可能提高每一击的平均力。
+
+## 1. 准备数据和 VLM 配置
+
+在同一个终端按顺序执行。已有的训练场景缓存会直接复用，人手映射 JSON 已在仓库中。
 
 ```bash
 cd /home/ubuntu20/CodeMujoco/hammering-task
 conda activate hammer
-
 export MUJOCO_GL=glfw
 export MPLBACKEND=Agg
-```
 
-## 2. 准备 A 场景和测试集
+bank=weight/hammer_rl/reset_bank_v1_256.npz
+mapping=data/human_grasp/processed/hammer_mapping.json
+run_dir="weight/hammer_rl/runs/teacher/vlm_$(date +%Y%m%d_%H%M%S)"
+scene="$run_dir/scene.json"
+recipe="$run_dir/reward_v1.json"
 
-按顺序生成 256 个训练/评估场景和 128 个独立测试场景。
-两者复用现有 `hammer_rl.prepare`，缓存场景初态、锤柄几何、深度、相机参数及 AnyGrasp 候选。
-每场景默认最多保留 32 个候选，沿用 SDK NMS 和覆盖采样；候选经现有标定转换为 mount 位姿，
-在 SDK 深度上额外深入 30 mm，仅转换时叠加一次。缓存包含 `offsets`、原始候选字段、
-`local_pos/local_quat/open_ctrl` 及 `mount_pos/mount_quat`。
-生成过程中在相机采集和 AnyGrasp 推理之前完成每个待保存状态的恢复复核。
-以下命令使用单进程生成，降低显存和内存峰值；不要同时运行两次生成命令。
-每份 NPZ 仅在该次全部场景生成完成后写出，中断后需从头生成。
+if [ ! -f "$bank" ]; then
+  python -m hammer_rl.prepare --output "$bank"
+fi
 
-```bash
-# 生成训练/评估缓存：四类各 45 个，扩展来源 76 个。
 python -m hammer_rl.prepare \
-  --output weight/hammer_rl/reset_bank_v1_256.npz \
-  --num-scenes 256 \
-  --legacy-per-placement 45 \
-  --random-scenes 76 \
-  --candidates-per-scene 32 \
-  --seed 42 \
-  --workers 1
-
-# 独立生成测试集：128 个场景，使用独立种子 43。
-python -m hammer_rl.prepare --test-set \
-  --output weight/hammer_rl/test_bank_v1_128.npz \
-  --candidates-per-scene 32 \
-  --seed 43 \
-  --workers 1
+  --data-file "$bank" --scene-index 0 --scene-context "$scene"
 ```
 
-`--test-set` 固定生成 128 个场景，四类原始摆放各为 23、23、22、22 个，扩展来源为 38 个。
-每个场景使用 `SeedSequence([43, scene_index])` 独立采样，不从训练缓存抽取；
-全部保存为 `split=1`，评估时使用 `--split eval --episodes 0` 覆盖全部 128 个场景。
-测试模式忽略 `--num-scenes`、`--legacy-per-placement` 和 `--random-scenes`。
-现有 `reset_bank_v1_256.npz` 和 `test_bank_v1_128.npz` 已包含每场景 32 个候选，可直接复用。
-重新生成时指定新的 `--output` 路径以保留原数据；未指定时仍沿用历史默认文件名。
+设置 `OPENAI_API_KEY`。使用当前配置里的 `qwen4-max` 时，把 `OPENAI_BASE_URL` 设为提供该模型的 Responses API 基地址。所用服务需支持图像输入和 JSON Schema 输出。 [模型配置](../vlm_reward/configs/vlm.yaml)
 
-可视化查看生成后的训练/评估缓存：
+## 2. 生成初始奖励并从零训练 Teacher
 
-```bash
-python -m visualization.hammer_reset_bank \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --scene-index 135 --wait-time 30
-```
-
-可选：生成后使用独立检查工具复查已有缓存，常规生成无需另行执行。
-
-```bash
-python -m hammer_rl.check_reset_bank \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --duration 30
-
-python -m hammer_rl.check_reset_bank \
-  --data-file weight/hammer_rl/test_bank_v1_128.npz \
-  --duration 30
-```
-
-独立复查各覆盖缓存中的全部场景，使用与生成时相同的 MuJoCo Warp 后端额外仿真 30 s，
-不重新采样或改写原 NPZ。每 20 ms 记录位姿、速度及有效支架接触，分别输出至 bank 同目录的
-`reset_bank_v1_256_stability_30s/` 和 `test_bank_v1_128_stability_30s/`
-（`summary.json`、逐场景 `scenes.csv`、`traces.npz`）。
-累计漂移以相对缓存超过 3 mm 或 2° 计；`passes_stability` 同时要求全程有效支架接触，
-`fails_stability` 应为 0。另外保留最后 0.5 s 的历史 5 mm / 3° 判定及
-1 mm / 1° 窗口指标，便于对比旧报告。浏览器默认也额外等待 30 s，显示累计漂移；
-N/P 切换场景、空格暂停/继续、R 从缓存重播，`--wait-time 0` 查看静态缓存。
-
-蒸馏和学生每次 reset 使用物理随机化：质量/惯量 `U(0.90,1.10)`、
-指面摩擦 `U(0.80,1.20)`、扭簧刚度 `U(0.80,1.20)` 倍率。
-每个环境的窄指和宽指扭簧共用一个刚度倍率，每次 reset 均基于名义刚度
-`0.2 N·m/rad` 重新采样，范围为 `0.16～0.24 N·m/rad`。
-学生和蒸馏保留深度噪声，SGS 仍以 A 场景为单位。
-
-### 2.1 策略与动作
-
-actor 仅在 A 起点输出一次候选局部的 6D 抓取残差，通过 `refine_pose` 合成最终位姿。
-动作经 `tanh` 后，各平移分量乘 0.10 m，各旋转分量乘 π/5 rad；预抓取位置沿接近方向后退 0.10 m。
-AnyGrasp 仅在离线准备时生成候选，训练使用缓存位姿；零残差还原候选位姿及其开度。
-公开/特权观测分别为 50/87 维，在 reset 时生成并冻结。
-抓取抬升后沿固定分段轨迹搬运、调转朝向、下降至挥击起点并保持 1 s，
-随后执行当前的三次抛物线挥击、恢复位姿、卸载和撤离，过程中不重新调用策略。
-原 34/66 维直接抓姿模型与当前观测结构不同，使用独立训练目录重新训练；不迁移旧检查点。
-
-## 3. 教师 PPO 训练
-
-教师 actor 和 critic 使用特权观测。所有连续稳定位姿的训练场景从首次 reset 起开放。
-仅教师训练启用逐场景 SGS，以缓存行号 `scene_id` 为唯一统计键，
-每个训练场景保留最近 100 个已完成尝试的二值 `task_success`。
-`task_success` 表示抓取、保持、有效命中且卸载结束前仍持有的完整任务成功，
-课程仅使用该成功历史；原有力奖励和冲量指标保持不变。
-场景无历史时成功率先验为 0.5，首次更新前均匀采样全部训练场景。
-
-课程参数保存在 `run_config.json` 的 `scene_sgs`，由现有课程项的 `params` 使用：
-
-| 参数 | 值 |
-| --- | --- |
-| `history_size` | 100 |
-| `update_interval` | 10 |
-| `target_success` | 0.0 |
-| `concentration` | 1.0 |
-| `temperature` | 1.0 |
-| `epsilon` | 1e-4 |
-| `uniform_mix` | 0.2 |
-
-每 10 个包含完成回合的批次更新一次概率，无额外热身。仅在训练场景间计算：
-
-```text
-p_i = mean(last_100_task_success_i)  # 无历史为 0.5
-w_i = (p_i + eps) ** (kappa * t) * (1 - p_i + eps) ** (kappa * (1 - t))
-logit_i = log(max(w_i, eps) + eps) / T
-q_adaptive = softmax(logit)
-q_train = 0.8 * q_adaptive + 0.2 / N_train
-q_eval = 0
-```
-
-其中 `t=0.0`、`kappa=1.0`、`T=1.0`、`eps=1e-4`、`uniform_mix=0.2`，
-`N_train` 为训练场景数。成功率越接近 0，场景优先级越高；忽略数值处理项时，
-80% 的采样概率按失败率分配，其余 20% 均匀分配给全部训练场景。
-`q_i` 是场景采样概率，不是成功率；每次 reset 直接使用对应的场景权重，
-场景内候选继续均匀采样。评估场景不累计历史，采样权重为零。
-同一场景的并行完成回合全部计入历史，初始化和恢复后的零长度 reset 不计入。
-日志仅输出 `sgs_mean_success`、`sgs_mean_probability`、`sgs_min_probability`、
-`sgs_max_probability`、`sgs_observed_scenes`，不逐场景生成日志键。
-
-新 teacher run 使用当前参数、空历史和均匀初始概率；新 SGS checkpoint 普通 `--resume`
-恢复保存的参数、逐场景历史、概率和完成批次计数。旧 SGS 配置或状态切换到当前策略时，
-须显式添加 `--reset-scene-sgs` 并通过 `--data-file` 指定场景缓存，可沿用原缓存，
-保留模型、优化器和迭代，清空课程状态并采用当前 SGS 参数，不自动迁移旧课程状态。
-具体续训方法见第 7 节。
-
-```bash
-python -m hammer_rl.train \
-  --stage teacher \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --num-envs 2048 \
-  --max-iterations 5000 \
-  --device cuda:0 \
-  --seed 42 \
-  --log-dir weight/hammer_rl/runs/teacher/teacher_01_human
-```
-
-```bash
-python -m hammer_rl.train \
-  --stage teacher \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --num-envs 512 --max-iterations 5000 --device cuda:0 --seed 42 \
-  --log-dir weight/hammer_rl/runs/teacher/anygrasp_residual_02
-```
-
-## 4. 教师向学生蒸馏
-
-学生使用深度图和公开抓取候选信息，学习教师输出。此阶段默认开启物理随机化和深度噪声。
-
-```bash
-python -m hammer_rl.train \
-  --stage distill \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --teacher-checkpoint weight/hammer_rl/runs/teacher/a_only_01/model_2999.pt \
-  --num-envs 128 \
-  --max-iterations 1000 \
-  --device cuda:0 \
-  --seed 42 \
-  --log-dir weight/hammer_rl/runs/distill/a_only_01
-```
-
-从头成功完成 1000 次蒸馏更新后，最终权重为：
-
-```text
-weight/hammer_rl/runs/distill/a_only_01/model_999.pt
-```
-
-## 5. 学生 PPO 微调
-
-从蒸馏权重初始化学生 actor，再进行 PPO 训练。学生 actor 使用深度图和公开抓取候选信息，
-critic 也使用相同的深度和公开观测，输出一个价值，无动作分布。
-actor 与 critic 使用各自的 CNN 和归一化统计；此阶段默认开启物理随机化和深度噪声。
-
-```bash
-python -m hammer_rl.train \
-  --stage student \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --init-from weight/hammer_rl/runs/distill/a_only_01/model_999.pt \
-  --num-envs 128 \
-  --max-iterations 3000 \
-  --device cuda:0 \
-  --seed 42 \
-  --log-dir weight/hammer_rl/runs/student/a_only_01
-```
-
-从头成功完成 3000 次更新后，最终权重为：
-
-```text
-weight/hammer_rl/runs/student/a_only_01/model_2999.pt
-```
-
-以上 3000 / 1000 / 3000 是项目提供的初始训练规模，不保证收敛。
-若调整迭代数或使用续训，请以程序结束时打印的 `checkpoint:` 路径为准，
-并同步修改下一阶段的输入权重路径。
-
-### 5.1 固定 actor 校准候选评分器
-
-教师和学生 PPO 仍随机采样一个候选训练。部署前固定最终 actor，逐个训练候选执行
-actor 的确定性残差，以当前实际总奖励为标签，仅通过 MSE 更新 critic。
-校准沿用对应阶段的随机化，双方观测归一化统计保持固定；重复执行分别保存观测与回报。
-“最高分”表示预测的微调后总奖励最高，不等同于抓取成功率最高。
-
-```bash
-python -m hammer_rl.calibrate \
-  --checkpoint weight/hammer_rl/runs/student/a_only_01/model_best.pt \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --num-envs 16 \
-  --repeats 1 \
-  --epochs 20 \
-  --batch-size 256 \
-  --learning-rate 3e-4 \
-  --device cuda:0
-```
-
-也可将 checkpoint 换为已训练的教师，例如 `weight/hammer_rl/runs/teacher/a_only_01/model_best.pt`。
-默认只采集该缓存的训练划分，不使用留出的评估场景；`--data-file` 可指定缓存，
-`--episodes 4 --epochs 1 --num-envs 4` 可限制为短运行。
-默认输出到源 checkpoint 同目录的 `calibration_model_best/`，可用 `--output-dir` 指定新目录：
-
-- `samples.pt`：执行前的 critic 输入、本次实际奖励、场景及候选编号。
-- `deployment.pt`：配套 actor、校准后的 critic 及各自模型内的归一化统计。
-- `run_config.json`：模型配置及本次校准参数。
-
-`deployment.pt` 用于推理和评估，不包含 PPO 优化器状态，不用于 `--resume`。
-actor 更新后，应重新校准。蒸馏 checkpoint 包含学生、教师和优化器状态，但没有 critic，仍是中间产物；
-完整学生部署模型需要后续新版学生 PPO 和校准。不自动迁移旧的特权学生 critic。
-
-三个阶段还会在运行目录保留 `model_best.pt`：教师和学生 PPO 按本轮
-`Train/total_reward` 最高选优（多个采集步取均值），蒸馏按本轮 `Loss/behavior`
-最低选优。每轮比较，仅严格改善时覆盖；周期和最终权重仍按原方式保存。
-最佳权重包含完整训练状态，可用于评估、下一阶段初始化或 `--resume`。
-`infos["best_score"]` 在 PPO 阶段保存奖励，在蒸馏阶段保存损失的负值；同一运行目录已有
-`model_best.pt` 时沿用其最佳记录，否则从本次训练开始记录，不回溯旧权重。
-
-## 6. 生成总奖励曲线
-
-在另一个终端执行：
-
-```bash
-cd /home/ubuntu20/CodeMujoco/hammering-task
-conda activate hammer
-python visualization/hammer_rl_training.py \
-  --log-dir weight/hammer_rl/runs/teacher/a_only_01
-```
-
-读取已保存日志中的 `Train/total_reward`，生成一张 PNG 折线图：横轴为日志中的原始训练轮次，
-纵轴为各并行环境的总奖励均值，不进行平滑。输出路径为：
-
-```text
-weight/hammer_rl/runs/teacher/a_only_01/total_reward_per_iteration.png
-```
-
-图片反映执行命令时已保存的日志，重新运行即可更新并覆盖同名图片。
-该曲线从使用修改后脚本启动或继续训练时开始记录。
-
-训练目录包含 TensorBoard 日志、`model_*.pt` 权重和 `run_config.json` 配置。
-新训练默认教师和学生 PPO 每 100 次更新保存权重，蒸馏每 50 次；
-续训以该目录 `run_config.json` 中的 `rl.save_interval` 为准。正常结束时也会保存最终权重。
-每次新实验使用新的 `--log-dir`（例如 `a_only_02`）；省略该参数时会自动创建时间戳目录。
-
-## 7. 中断后继续训练
-
-以下续训适用于 50/87 维公开/特权观测、6D 输出模型。同一阶段继续训练使用 `--resume`。例如从已保存完整课程状态的教师
-`a_only_01/model_best.pt` 追加训练 3000 次更新：
-
-```bash
-python -m hammer_rl.train \
-  --stage teacher \
-  --resume weight/hammer_rl/runs/teacher/a_only_no_guide_01/model_best.pt \
-  --num-envs 512 \
-  --max-iterations 1500 \
-  --device cuda:0
-```
-
-- 将 `--resume` 替换为实际存在的 checkpoint 路径；蒸馏和学生阶段也可用相同方式续训。
-- `--max-iterations` 始终表示**本次追加的更新次数**，不是累计目标次数。
-- 续训会在原权重目录写入结果，并从该目录的 `run_config.json` 恢复阶段、
-  A 数据路径、锤头额外质量、教师 SGS 参数和算法配置。保留权重旁的配置文件；
-  同时传入 `--log-dir` 也不会改变续训输出目录。
-- 新策略教师周期和最终 checkpoint 均通过 `infos["scene_sgs"]` 保存 `history`、
-  `probabilities`、`completed_batches`；普通续训恢复全部课程状态。初始化或恢复后的
-  零长度 reset 不追加历史、不增加计数、不更新概率，但仍把当前概率应用到场景权重。
-- 显式使用 `--reset-scene-sgs --data-file 场景缓存路径` 时，采用本次命令的数据路径并写回
-  `run_config.json`，重置逐场景课程状态；不加此开关时继续恢复原运行的数据路径。
-- `--num-envs`、`--device`、`--seed` 仍取本次命令参数，建议与原训练保持一致。
-- `--teacher-checkpoint` 使用同结构教师启动蒸馏；`--init-from` 严格加载同结构 PPO 权重，
-  也可从蒸馏 checkpoint 初始化学生 actor。已有 87 维输入、6D 输出的同结构教师权重可直接初始化。
-  初始化使用新目录，不恢复旧优化器或课程；`--resume` 用于同阶段、同结构及课程状态匹配的恢复。
-
-## 8. 可视化回放
-
-```bash
-cd /home/ubuntu20/CodeMujoco/hammering-task
-
-python -m visualization.compare_hammering \
-  --checkpoint weight/hammer_rl/runs/teacher/a_only_01/model_best.pt \
-  --split eval \
-  --device cuda:0
-```
-
-`--checkpoint` 必填；从指定 `--split` 随机抽取三个连续场景，
-以六环境成对展示学习选择＋残差与 AnyGrasp 零残差。
-
-完成后暂停并保留最终画面与数值，按 **回车** 从缓存重新抽样再比较。
-
-## 9. 全部评估场景的命中率与峰值力对比 CSV
-
-在项目根目录、已激活 `hammer` 环境后，只需指定要对比的权重：
-
-```bash
-python -m hammer_rl.compare_evaluations \
-  --checkpoint weight/hammer_rl/runs/teacher/anygrasp_residual_01/model_best.pt \
-  --data-file weight/hammer_rl/test_bank_v1_128.npz \
-  --output-dir weight/hammer_rl/runs/teacher/anygrasp_residual_01/comparison_01 \
-  --anygrasp-extra-depth 0.03
-```
-
-分别运行 SDK 最高分＋零残差、critic 选择＋actor 残差两组，每组每场景执行一次。
-该入口默认读取 checkpoint 配置中的 A bank，
-使用其中留出的约 20% 场景（256 场景时为 51 个），每场景最多 32 个候选。
-自定义评估 bank 也须由新版 prepare 生成，实际评估范围由其中 `split` 决定。
-候选经过 AnyGrasp NMS，再以最高分位姿为起点，按平移和旋转距离做最远点采样。
-可用 `--episodes 4 --num-envs 4` 做短运行，或 `--data-file` 指定其他多候选缓存。
-
-默认输出到 checkpoint 同目录的 `comparison_<checkpoint文件名去扩展名>/`，
-可用 `--output-dir` 指定目录。最终仅生成 `metrics_comparison.csv`，以一个 `all` 行汇总两组的
-有效命中率（`valid_strike` 的均值，百分比）、平均有效峰值力（`mean_force` 的均值，N）
-以及训练策略减 SDK 基线的差值；命中率差值单位为百分点。峰值力均值包含未命中的零值。
-过程中的 `zero.npz` 和 `trained.npz` 在读取后删除，不生成 `selected.npz` 或 `trained_rewards.csv`。
-两组按同一场景顺序配对，候选编号允许不同；此对比同时包含候选选择和 actor 微调的效果，
-不分别报告二者的收益，也不导出抓取成功率、完整任务成功率或奖励明细。
-`--anygrasp-extra-depth` 只调整 SDK 基线的额外深入量，训练策略沿用缓存中的候选深度。
-
-单独评估学习选择：
-
-```bash
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --policy trained --selection learned \
-  --checkpoint weight/hammer_rl/runs/teacher/a_only_01/calibration_model_best/deployment.pt \
-  --split eval --episodes 0 --num-envs 16 --headless \
-  --output weight/hammer_rl/selected_eval.npz
-```
-
-`--selection all` 是原有逐候选评估，也是默认值；`sdk` 和 `learned` 每场景执行一次。
-`learned` 使用包含 actor 和 critic 的教师/学生 PPO 或部署权重；`all/sdk` 仍支持蒸馏 actor。
-评估默认关闭在线物理随机化（含扭簧刚度），但仍按评估 bank 恢复离线锤柄形态，
-因此名义物理参数评估仍包含 bank 中的形态变化；`--noise` 开启深度噪声，`--seed` 默认 42。
-
-### 9.1 学生在线推理接口
-
-```python
-from hammer_rl.inference import load_models, select_grasp
-
-actor, scorer = load_models("weight/hammer_rl/runs/student/a_only_01/calibration_model_best/deployment.pt")
-result = select_grasp(actor, scorer, depth, scene, grasps)
-```
-
-`depth` 为米单位 `(1, 120, 160)` 深度；`scene` 包含未批量的 `finger_pos`、`finger_vel`、
-`camera_pos`、`camera_quat`、`intrinsics`、`target_pos`、`target_quat`，字段与训练公开观测一致。
-位姿使用世界坐标，四元数为 wxyz，内参顺序为 fx、fy、cx、cy。
-手指状态使用与 reset 中按模型关节顺序取得的相同顺序。
-`grasps` 沿用 `generate_grasps` 返回的世界坐标候选字典，内部复用
-`candidate_to_mount(..., extra_depth=0.03)`，不读取仿真锤子真值。
-
-返回张量包含 `candidate_index`（输入集合内编号）、`score`、所有候选 `scores`、
-6 维抓取残差 `action`、最终 `mount_pos/mount_quat`、`pregrasp_pos`、`width` 和 `gripper_open_ctrl`。
-除全部候选评分外，单场景结果保留首维 1；CPU 执行器可取第 0 项并转换为 NumPy 使用最终位姿和开合量。
-教师评分继续使用特权观测，通过仿真内的 `select_candidates` 入口调用。
-
-## 10. 常用参数与操作提示
-
-| 参数 | 含义 |
-| --- | --- |
-| `--num-envs 128` | 并行环境数；显存不足时可先降至 32 或 16 |
-| `--max-iterations 3000` | 本次追加的更新次数 |
-| `--device cuda:0` | 使用第 0 张 GPU |
-| `--seed 42` | 随机种子 |
-| `--log-dir 路径` | 新训练的日志及权重目录 |
-| `--hammer-head-extra-mass 0.0` | 锤头额外质量，单位 kg；准备数据和训练必须一致 |
-
-- 训练入口没有 `--headless` 参数，按上面的命令启动即可。
-- 一次策略动作会执行完整抓取和锤击尝试；当前最长覆盖 8980 个物理子步，
-  不宜用普通单物理步环境的速度估计训练耗时。
-- 若修改锤头额外质量，为其另建缓存和实验目录；评估已训练模型时会读取 run 中的额外质量设置。
-  零残差基线则需要显式传入相同的 `--hammer-head-extra-mass`。
-- 现有 `runs/*/smoke/` 权重仅验证流程，不代表已收敛策略。
-- 256 场景、每场景最多 32 个候选是初始规模；是否需要更多数据或更新次数，依据评估结果决定。
-
-相关实现：[训练入口](train.py)、[A 数据准备](prepare.py)、[评分校准](calibrate.py)、
-[选择与微调](inference.py)、[评估入口](evaluate.py)、
-[网络和算法配置](rl_cfg.py)、[环境配置](env_cfg.py)、[场景总体对比](compare_evaluations.py)、
-[六场景展示](../visualization/compare_hammering.py)。
-
-## 11. 正式生成前的验证
-
-```bash
-python -m hammer_rl.prepare \
-  --output /tmp/hammer_a4.npz --num-scenes 4 \
-  --legacy-per-placement 1 --random-scenes 0 --candidates-per-scene 4 --seed 42
-python -m hammer_rl.evaluate \
-  --data-file /tmp/hammer_a4.npz \
-  --split train --policy zero --selection sdk --episodes 4 --num-envs 4 --headless \
-  --output /tmp/hammer_a_eval4.npz
-```
-
-四个 A 样本因每类只有一个而全部属于 train。
-零残差用于检查真实管线，不代表学习后的任务成功率。正式实验使用上面的完整 bank 与新目录。
-
-## 12. 离线 ContactPose 映射与可选 RewardRecipe
-
-新增路径为 `mapping/ → MappingCode.json → vlm_reward/ → RewardRecipe.json → hammer_rl/`。
-三个包通过 JSON 交换数据，不互相导入；训练不调用 API、不训练 Encoder、不改变观测、6D 动作、
-固定轨迹、PPO 或 SGS。缺省不传 `--reward-recipe` 时使用原奖励注册和权重。
-
-本机已从 [ContactPose 官方样例](https://github.com/facebookresearch/ContactPose#readme)下载并筛选：
-`data/human_grasp/source/contactpose/data/contactpose_data/full28_use/{hammer,knife,flashlight}/`。
-每个对象含真实 `annotations.json` 和接触 `.ply`，另保留官方标记坐标、打印模型及许可。
-未下载 RGB-D 图像包；原始子集由 `.gitignore` 排除。
-来源、官方代码 commit、文件 SHA256 见
-[`contactpose_source.json`](../data/human_grasp/processed/contactpose_source.json)。
-官方 `utilities/misc.py` 中已失效的 `np.int` 在本地依赖中替换为等价 `int`，以使用现有 NumPy 1.26；
-未复制加载器或添加运行时兼容层。当前 `hammer` 环境已安装官方 `openai` SDK。
-
-默认只用参与者 28：每种对象 **1 条示范**，586/613/480 个时间帧分别用于锤子/刀/手电筒的姿态均值，
-不增加示范计数。增加参与者时同时准备其接触图和标注，并修改
-[`mapping.yaml`](../mapping/configs/mapping.yaml)。扫帚明确使用 `flashlight` 代理。
-[`tool_frames.yaml`](../mapping/configs/tool_frames.yaml) 是根据下载的注册接触网格可视化标定的把手坐标，
-端部截面由人工选定，横向中心为毫米级近似；不是自动估计出的机器人配对标签。
-ContactPose 接触网格单位为 m，另存的打印模型单位为 mm，不能混用。
-实际锤柄区域与 MuJoCo 坐标核对见
-[`hammer_mapping_check.png`](../data/human_grasp/processed/hammer_mapping_check.png)。
-
-```bash
-conda activate hammer
-for task in hammer broom knife; do
-  python -m mapping.export_mapping --task "$task" \
-    --contactpose-root data/human_grasp/source/contactpose \
-    --output "data/human_grasp/processed/${task}_mapping.json"
-done
-
-# 复用现有 bank，导出真实 RGB、米单位 depth.npy、相机参数和物理摘要。
-MUJOCO_GL=glfw MPLBACKEND=Agg python -m hammer_rl.prepare \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz --scene-index 0 \
-  --scene-context data/human_grasp/processed/hammer_scene_context.json
-```
-
-映射只统计已测量的把手表面，官方 `texture_proc` 处理接触强度，各记录等权；
-抓持中心由接触强度加权，拇指尖与食指尖构造对向轴，腕到接触中心构造正交接近轴。
-固定轴向/角度分箱产生热点和覆盖比例，主方向用符号对称统计汇总。
-OmniPicker 的执行器、Site、碰撞几何、被动弹簧和耦合参数直接读取现有 XML。
-`u=0` 为把手靠工作端、`u=1` 为自由端；`u_RL=2u-1` 对应本地锤柄的 `x/half_length`。
-
-配置模型见 [`vlm.yaml`](../vlm_reward/configs/vlm.yaml)，API Key 通过本机 `OPENAI_API_KEY` 提供。
-下列命令使用官方 Responses API，将 RGB 和带米单位色阶的伪彩深度作为两张图片发送，
-通过 Structured Outputs 限定真实算子、`identity` 尺度和三种门控。
-模型只输出奖励项、权重和理由；数值先验由导出程序原样合并，API 不参与训练。
+第一条命令用任务描述、RGB-D 和人手映射生成奖励 JSON。第二条启动全新的 PPO 训练，直接使用这份配方。 [初始提示词](../vlm_reward/prompts/reward_design.md)
 
 ```bash
 python -m vlm_reward.reward_designer --task hammer \
-  --mapping data/human_grasp/processed/hammer_mapping.json \
-  --scene-context data/human_grasp/processed/hammer_scene_context.json \
-  --description "沿固定轨迹完成三次有效敲击，提高冲量并保持抓持稳定" \
-  --output weight/vlm_reward/hammer_mapping_vlm_v1.json
+  --mapping "$mapping" --scene-context "$scene" \
+  --description "保持三次有效命中和终局持有，尽可能提高每一击的平均力" \
+  --output "$recipe"
+
+python -m hammer_rl.train --stage teacher \
+  --data-file "$bank" --reward-recipe "$recipe" \
+  --num-envs 512 --max-iterations 5000 --seed 42 \
+  --log-dir "$run_dir/initial"
 ```
 
-四组对照使用同一 bank、种子、训练预算和原始物理指标：
+初始训练的 checkpoint 保存在 `$run_dir/initial/`，下一步用其中按训练奖励选出的 `model_best.pt`。
 
-| 组别 | 配置 |
-| --- | --- |
-| 原始基线 | 不传 `--reward-recipe` |
-| 仅映射先验 | `weight/vlm_reward/hammer_prior_only_v1.json`，原权重加两项权重各为 2 的先验；人工消融配置 |
-| 仅 VLM | 上述设计命令增加 `--without-mapping`，输出改为 `hammer_vlm_only_v1.json`；模型不接收映射和先验算子 |
-| 映射＋VLM | 上述设计命令输出的 `hammer_mapping_vlm_v1.json` |
+## 3. 按实测表现修订奖励并续训
 
-仅映射先验配置已在本机生成；重新生成时复用现有奖励权重：
+每轮先评估 Teacher，让 VLM 根据失败阶段和力度提出新配方，再从同一个 checkpoint 分别用旧、新配方做 100 次 PPO 更新，保留实测表现更好的分支。当前按完整成功率、挥击前持有率、命中比例、较低掉落率、平均敲击力依次比较。 [修订提示词](../vlm_reward/prompts/reward_revision.md) · [分支比较](../vlm_reward/adaptive_train.py#L36)
 
 ```bash
-python - <<'PY'
-import json
-from pathlib import Path
-from hammer_rl.env_cfg import make_env_cfg
-from vlm_reward.reward_designer import assemble_recipe
-mapping_ref = 'data/human_grasp/processed/hammer_mapping.json'
-terms = [dict(id=name, weight=term.weight, scale='identity', gate='none')
-         for name, term in make_env_cfg().rewards.items()]
-terms += [dict(id=name, weight=2.0, scale='identity', gate='lift_success')
-          for name in ('prior_region', 'prior_axis')]
-recipe = assemble_recipe(dict(terms=terms, rationale='Manual mapping ablation; not VLM generated.'),
-    json.loads(Path(mapping_ref).read_text()), recipe_id='hammer_prior_only_v1',
-    mapping_ref=mapping_ref, profile_id='default')
-output = Path('weight/vlm_reward/hammer_prior_only_v1.json')
-output.parent.mkdir(parents=True, exist_ok=True)
-output.write_text(json.dumps(recipe, indent=2) + '\n')
-PY
-
-# 基线：省略下一条命令的 --reward-recipe，并使用独立 --log-dir。
-python -m hammer_rl.train --stage teacher \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --reward-recipe weight/vlm_reward/hammer_prior_only_v1.json \
-  --num-envs 512 --max-iterations 5000 --device cuda:0 --seed 42 \
-  --log-dir weight/hammer_rl/runs/teacher/mapping_prior_v1
-
-python -m hammer_rl.evaluate \
-  --data-file weight/hammer_rl/reset_bank_v1_256.npz \
-  --policy trained --checkpoint weight/hammer_rl/runs/teacher/mapping_prior_v1/model_best.pt \
-  --split eval --episodes 0 --num-envs 16 --device cuda:0 \
-  --output weight/hammer_rl/runs/teacher/mapping_prior_v1/evaluation.npz
+python -m vlm_reward.adaptive_train \
+  --data-file "$bank" --mapping "$mapping" --scene-context "$scene" \
+  --initial-checkpoint "$run_dir/initial/model_best.pt" --initial-recipe "$recipe" \
+  --rounds 3 --train-iters-per-round 100 --num-envs 512 --seed 42 \
+  --output-dir "$run_dir/adaptive"
 ```
 
-Recipe 模式在抬升末帧复用实际指尖 Site、工具位姿和有效抬升门控，缓存 `prior_region`、`prior_axis`。
-`rewards.recipe()` 组合缓存，只有一个总奖励项；原始冲量、位姿漂移、成功率和两项先验保持独立日志。
-`run_config.json` 记录 Recipe 路径、ID 和版本，续训/评估/校准读取同一配置。
-每版 Recipe 使用独立文件，训练期间不改写；比较物理效果，不能比较不同配方的总奖励大小。
+最终选中的权重和奖励配方在 `$run_dir/adaptive/rounds.jsonl` 的最后一行，字段分别是 `selected_checkpoint` 和 `selected_recipe`。
 
-本次验收：真实三份映射与 RGB-D 已导出；原奖励和人工先验配置分别完成 4 环境、1 次 PPO 更新，
-结果见 [`reward_smoke_metrics.json`](../data/human_grasp/processed/reward_smoke_metrics.json)。
-未测区域排除、记录等权统计、方向单位化、旋转正交性、请求双图结构、先验原样合并和奖励门控均已验证。
-按本次要求，VLM 不执行真实 API 调用。两种 CLI 模式（映射＋VLM、仅 VLM）已通过官方 SDK 的
-本地 HTTP 模拟响应验证，覆盖双图序列化、Structured Outputs schema 和先验原样合并；
-结果见 [`vlm_interface_validation.json`](../data/human_grasp/processed/vlm_interface_validation.json)。
-该验证不生成用于实验的 VLM Recipe；上述短运行不代表收敛或效果提升。
-现有 `evaluate` 已读取先验配置完成 4 个评估回合，输出为
-`weight/hammer_rl/runs/teacher/mapping_smoke_prior/evaluation.npz`；均成功抬升但随后掉落，完整任务成功率为 0。
-随后两组各完成全部 51 个留出场景评估，逐回合奖励均与配方求和一致；两组抬升成功率均为 50/51，
-完整任务成功率均为 0。原始结果分别在 `mapping_smoke_baseline/evaluation_all_51.npz` 和
-`mapping_smoke_prior/evaluation_all_51.npz`，汇总见
-[`reward_full_evaluation.json`](../data/human_grasp/processed/reward_full_evaluation.json)。
-恢复验证省略 `--reward-recipe`，自动读取原配方并从第 0 次更新续训到第 1 次，
-SGS 完成批次从 1 增至 2、历史样本从 4 增至 8，Actor 参数继续更新且结构不变；
-检查点为 `weight/hammer_rl/runs/teacher/mapping_smoke_prior_resume/model_1.pt`，详见
-[`reward_resume_validation.json`](../data/human_grasp/processed/reward_resume_validation.json)。
-扫帚和刀仅完成映射导出，未新增清扫/切割物理场景，也未注册虚构的覆盖率或切割进度。
+## 4. 在独立测试场景评估 Teacher
+
+```bash
+test_bank=weight/hammer_rl/test_bank_v1_128.npz
+if [ ! -f "$test_bank" ]; then
+  python -m hammer_rl.prepare --test-set --output "$test_bank"
+fi
+
+teacher_ckpt=$(tail -n 1 "$run_dir/adaptive/rounds.jsonl" | \
+  python -c 'import json, sys; print(json.load(sys.stdin)["selected_checkpoint"])')
+
+python -m hammer_rl.evaluate --policy trained --selection sdk \
+  --checkpoint "$teacher_ckpt" --data-file "$test_bank" \
+  --split eval --episodes 0 --headless --output "$run_dir/test.npz"
+```
+
+终端输出里看 `task_success` 的均值（完整成功率），以及 `mean_force` 和 `strike_force_1` 到 `strike_force_3`（平均力度和各次敲击力度，单位 N）。

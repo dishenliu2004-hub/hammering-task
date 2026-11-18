@@ -5,6 +5,7 @@ AVAILABLE_TERMS = {
     "lift_progress": "真实抬升高度/阈值，截断到0..1且须双侧接触",
     "lift_success": "抬升至少0.15m且双侧接触，0/1",
     "grasp_before_swing": "挥击前仍有效持有，0/1",
+    "hold_fraction": "抬升结束到挥击前保持双侧有效接触且尚未掉落的子步比例，0..1",
     "wrap": "现有包络角和基座座靠分，已由有效抬升门控，非严格0..1",
     "orientation": "现有横向夹持偏好，非人手方向，0..1且有效抬升门控",
     "distance": "实际夹持中心到锤头沿柄轴距离/0.315m，截断0..1且有效抬升门控",
@@ -30,3 +31,19 @@ def design_schema(available_terms):
                     "scale": {"type": "string", "enum": ["identity"]},
                     "gate": {"type": "string", "enum": ["none", "lift_success", "grasp_before_swing"]}}}},
             "rationale": {"type": "string"}}}
+
+
+def revision_schema():
+    schema = design_schema(AVAILABLE_TERMS)
+    item = schema["properties"]["terms"]["items"]
+    del item["properties"]["scale"]
+    item["required"] = ["id", "weight", "gate", "formula", "params"]
+    item["properties"].update(
+        formula={"type": "string", "enum": ["identity", "power", "prior_gaussian",
+                                            "prior_axis_power", "force_mean_min", "hold_drift"]},
+        params={"type": "array", "items": {"type": "number"}},
+    )
+    for field in ("failure_mode", "expected_effect"):
+        schema["required"].append(field)
+        schema["properties"][field] = {"type": "string"}
+    return schema
