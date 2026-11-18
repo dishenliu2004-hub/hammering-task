@@ -40,9 +40,12 @@ def attempt_substeps(physics_dt, unload_time, num_strikes=3, recover_time=0.8):
     )
 
 
+def _rotation_delta(start, end):
+    return axis_angle_from_quat(quat_mul(end, quat_conjugate(start)))
+
+
 def interpolate_quat(start, end, s):
-    delta = axis_angle_from_quat(quat_mul(end, quat_conjugate(start)))
-    return quat_box_plus(start, delta * s)
+    return quat_box_plus(start, _rotation_delta(start, end) * s)
 
 
 def sampled_progress(substep, duration, substeps, quintic=False):
@@ -230,12 +233,22 @@ class GraspResidualAction(ActionTerm):
         pivot = self.target_pos - quat_apply(self.impact_quat, self.tip_offset)
         self.grip_impact = pivot + quat_apply(self.impact_quat, self.grip_offset)
         self.head_impact = pivot + quat_apply(self.impact_quat, self.head_offset)
-        self.carry_quat = data.mocap_quat[:, self.mocap].clone()
-        self.head_start = data.mocap_pos[:, self.mocap] + quat_apply(self.carry_quat, self.head_offset)
-        self.high_start, self.high_target = self.head_start.clone(), self.head_impact.clone()
-        self.high_start[:, 2] = self.high_target[:, 2] = 0.75
+        carry_quat = data.mocap_quat[:, self.mocap].clone()
+        head_start = data.mocap_pos[:, self.mocap] + quat_apply(carry_quat, self.head_offset)
+        high_start, high_target = head_start.clone(), self.head_impact.clone()
+        high_start[:, 2] = high_target[:, 2] = 0.75
         self.strike_pos = self._swing_pose(0.0)[0]
-        self.head_strike = self.strike_pos + quat_apply(self.raised_quat, self.head_offset)
+        head_strike = self.strike_pos + quat_apply(self.raised_quat, self.head_offset)
+        segments = (
+            (2.0, head_start, high_start, carry_quat, carry_quat),
+            (4.0, high_start, high_target, carry_quat, carry_quat),
+            (4.0, high_target, high_target, carry_quat, self.raised_quat),
+            (2.0, high_target, head_strike, self.raised_quat, self.raised_quat),
+        )
+        self._carry_segments = tuple(
+            (duration, round(duration / self._env.physics_dt), p0, p1 - p0, q0, _rotation_delta(q0, q1))
+            for duration, p0, p1, q0, q1 in segments
+        )
 
     def _swing_pose(self, s):
         quat = quat_box_plus(self.impact_quat, -math.pi / 3 * (1 - s) * self.swing_axis)
@@ -267,16 +280,11 @@ class GraspResidualAction(ActionTerm):
                 k -= steps
         elif k <= self.swing_start:
             k -= self.lift_end
-            segments = ((2.0, self.head_start, self.high_start, self.carry_quat, self.carry_quat),
-                (4.0, self.high_start, self.high_target, self.carry_quat, self.carry_quat),
-                (4.0, self.high_target, self.high_target, self.carry_quat, self.raised_quat),
-                (2.0, self.high_target, self.head_strike, self.raised_quat, self.raised_quat))
-            for duration, p0, p1, q0, q1 in segments:
-                steps = round(duration / self._env.physics_dt)
+            for duration, steps, p0, delta_pos, q0, delta_rot in self._carry_segments:
                 if k <= steps:
                     s = sampled_progress(k, duration, self.substeps, quintic=True)
-                    q = interpolate_quat(q0, q1, s)
-                    self._write(p0 + s * (p1 - p0) - quat_apply(q, self.head_offset), q)
+                    q = quat_box_plus(q0, delta_rot * s)
+                    self._write(p0 + s * delta_pos - quat_apply(q, self.head_offset), q)
                     return
                 k -= steps
             self._write(self.strike_pos, self.raised_quat)

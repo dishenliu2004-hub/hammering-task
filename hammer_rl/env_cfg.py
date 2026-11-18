@@ -81,7 +81,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
             secondary=ContactMatch(mode="geom", pattern="hammer_handle"),
             fields=("found", "force"), reduce="maxforce", num_slots=2),
         # 掌面与整个锤子的接触：闭合末帧的严格真包络判定。
-        # 保留接触槽逐点判断法向力，槽数与 nconmax 一致。
+        # 保留 128 个输出槽，逐点判断法向力。
         ContactSensorCfg(name="palm_contact",
             primary=ContactMatch(mode="geom", pattern=("gripper_base_collision_part1", "gripper_base_collision_part2")),
             secondary=ContactMatch(mode="subtree", pattern="hammer_Object"),
@@ -112,7 +112,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         randomize_physics=randomize, visual_noise=stage in ("distill", "student"),
         scene=SceneCfg(num_envs=num_envs, sensors=sensors,
             spec_fn=partial(_attach_scene, hammer_head_extra_mass=hammer_head_extra_mass)),
-        sim=SimulationCfg(nconmax=128, njmax=1024, contact_sensor_maxmatch=128, mujoco=MujocoCfg(
+        sim=SimulationCfg(nconmax=64, njmax=512, contact_sensor_maxmatch=4, mujoco=MujocoCfg(
             timestep=opt.timestep,
             integrator=mujoco.mjtIntegrator(opt.integrator).name.removeprefix("mjINT_").lower(),
             cone="elliptic",

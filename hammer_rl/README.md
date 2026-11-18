@@ -149,7 +149,7 @@ python -m hammer_rl.train \
   --max-iterations 5000 \
   --device cuda:0 \
   --seed 42 \
-  --log-dir weight/hammer_rl/runs/teacher/anygrasp_residual_01
+  --log-dir weight/hammer_rl/runs/teacher/teacher_01_human
 ```
 
 ```bash
