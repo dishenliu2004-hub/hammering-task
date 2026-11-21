@@ -1,1 +1,1 @@
-"""ContactPose 到 OmniPicker 的离线确定性几何映射。"""
+"""从人手抓姿到 OmniPicker 的离线几何映射。"""

@@ -61,11 +61,11 @@ def build_enclosure_geometry(model, device):
     return SimpleNamespace(
         hammer=hammer, base=base, convex_parts=tuple(parts), support_height=float(palm_local[:, 2].max()),
         handle_part_index=handle_part_index,
-        second_joints=[model.joint(f"gripper_hand_{side}2_joint").id for side in sides],
-        distal_joints=[model.joint(f"gripper_hand_{side}3_joint").id for side in sides],
-        distal_bodies=[model.body(f"gripper_hand_{side}3_Link").id for side in sides],
-        tips=[model.site(f"gripper_hand_{side}_contact_tip").id for side in sides],
-        origins=[model.site(f"gripper_hand_{side}_outer_tip").id for side in sides],
+        second_joints=torch.tensor([model.joint(f"gripper_hand_{side}2_joint").id for side in sides], device=device),
+        distal_joints=torch.tensor([model.joint(f"gripper_hand_{side}3_joint").id for side in sides], device=device),
+        distal_bodies=torch.tensor([model.body(f"gripper_hand_{side}3_Link").id for side in sides], device=device),
+        tips=torch.tensor([model.site(f"gripper_hand_{side}_contact_tip").id for side in sides], device=device),
+        origins=torch.tensor([model.site(f"gripper_hand_{side}_outer_tip").id for side in sides], device=device),
         directions=torch.tensor(directions, dtype=torch.float32, device=device),
         theta_max=torch.tensor((ENC_THETA_MAX_N_DEG, ENC_THETA_MAX_W_DEG),
                                dtype=torch.float32, device=device))

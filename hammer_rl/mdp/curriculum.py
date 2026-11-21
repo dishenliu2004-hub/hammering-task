@@ -17,9 +17,9 @@ SGS_PARAMS = {
 class SceneSgsCurriculum:
     def __init__(self, cfg, env):
         self.task = env.hammer
-        self.train_mask = self.task.bank["split"] == 0
+        self.train_mask = self.task.sampling_weights.bool()
         self.train_ids = self.train_mask.nonzero().flatten().tolist()
-        # 历史按缓存行号索引；评估场景的历史始终为空。
+        # 历史按缓存行号索引，只记录参与训练的场景。
         self.history = [
             torch.empty(0, dtype=torch.float32, device=env.device)
             for _ in self.task.bank["split"]
@@ -30,6 +30,8 @@ class SceneSgsCurriculum:
             dtype=torch.float32, device=env.device,
         )
         self.completed_batches = 0
+        self.pending = torch.empty((0, 2), dtype=torch.long, device=env.device)
+        self.stats = None
 
     def __call__(
         self,
@@ -44,11 +46,16 @@ class SceneSgsCurriculum:
         uniform_mix,
     ):
         completed = env.episode_length_buf[env_ids] >= 1
-        if completed.any():
-            completed_ids = env_ids[completed]
-            # 课程在 reset 覆盖 scene_id 和动作评分前读取旧回合。
-            old_scene = self.task.scene_id[completed_ids]
-            success = env.action_manager.get_term("grasp").values["task_success"][completed_ids].float()
+        scenes = self.task.scene_id[env_ids][completed]
+        if len(scenes):
+            # 在局部 reset 覆盖旧回合前保存结果；每 N 个样本推进一次原 SGS 批次。
+            success = env.action_manager.get_term("grasp").values["task_success"][env_ids][completed].long()
+            rows = torch.stack((scenes, success), dim=1)
+            self.pending = torch.cat((self.pending, rows))
+        complete_batch = len(self.pending) >= env.num_envs
+        if complete_batch:
+            old_scene, success = self.pending[:env.num_envs].unbind(1)
+            self.pending = self.pending[env.num_envs:]
             for scene in old_scene.unique().tolist():
                 if self.train_mask[scene]:
                     # 同场景的并行完成回合全部追加，再保留最近 H 条。
@@ -56,6 +63,8 @@ class SceneSgsCurriculum:
                         (self.history[scene], success[old_scene == scene])
                     )[-history_size:]
             self.completed_batches += 1
+        elif self.stats is not None:
+            return self.stats
 
         success_rate = torch.full_like(self.probabilities, 0.5)
         observed = torch.zeros_like(self.probabilities, dtype=torch.bool)
@@ -64,7 +73,7 @@ class SceneSgsCurriculum:
                 success_rate[i] = self.history[scene].mean()
                 observed[i] = True
 
-        if completed.any() and self.completed_batches % update_interval == 0:
+        if complete_batch and self.completed_batches % update_interval == 0:
             weight = (success_rate + epsilon).pow(concentration * target_success) * (
                 1.0 - success_rate + epsilon
             ).pow(concentration * (1.0 - target_success))
@@ -78,7 +87,7 @@ class SceneSgsCurriculum:
         self.task.sampling_weights.zero_()
         self.task.sampling_weights[self.train_mask] = self.probabilities
 
-        return {
+        self.stats = {
             "sgs_mean_success": success_rate[observed].mean() if observed.any()
                                 else success_rate.new_zeros(()),
             "sgs_mean_probability": self.probabilities.mean(),
@@ -86,6 +95,7 @@ class SceneSgsCurriculum:
             "sgs_max_probability": self.probabilities.max(),
             "sgs_observed_scenes": observed.sum(),
         }
+        return self.stats
 
     def state_dict(self):
         return {
@@ -95,6 +105,7 @@ class SceneSgsCurriculum:
         }
 
     def load_state_dict(self, state):
+        self.stats = None
         self.history = state["history"]
         self.probabilities = state["probabilities"]
         self.completed_batches = state["completed_batches"]

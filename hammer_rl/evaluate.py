@@ -11,12 +11,20 @@ import numpy as np
 import torch
 from PIL import Image
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.managers.recorder_manager import RecorderTerm, RecorderTermCfg
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.utils.lab_api.math import quat_apply
 
+from .collection import HammerCollectionEnv
 from .env_cfg import make_env_cfg
 from .mdp.observations import sync_data
 from .inference import load_models, select_candidates
+
+
+class _TerminalMetrics(RecorderTerm):
+    def record_pre_reset(self, env_ids):
+        values = self._env.action_manager.get_term("grasp").values
+        self.values = {name: value.clone() for name, value in values.items()}
 
 
 def candidate_batches(env, pairs, episodes):
@@ -120,7 +128,9 @@ def main():
     cfg.randomize_physics = False
     cfg.events.pop("physics", None)
     cfg.visual_noise = args.noise
-    env = ManagerBasedRlEnv(cfg, device=args.device)
+    cfg.recorders["terminal"] = RecorderTermCfg(func=_TerminalMetrics)
+    env_type = ManagerBasedRlEnv if args.viewer else HammerCollectionEnv
+    env = env_type(cfg, device=args.device)
     wrapper = RslRlVecEnvWrapper(env)
     policy = None
     try:
@@ -167,20 +177,10 @@ def main():
                                   policy(wrapper.get_observations()))
                     if viewer is not None:
                         sync_data(env, data)
-                    # 自动 reset 会清空过程量；仅评估在最终子步克隆结果。
-                    term = env.action_manager.get_term("grasp")
-                    callback = term.on_physics_step
-                    captured = {}
-                    def capture(term):
-                        if callback is not None:
-                            callback(term)
-                        if term._substep == env.cfg.decimation:
-                            captured.update({key: value.clone() for key, value in term.values.items()})
-                    term.on_physics_step = capture
                     if args.feedback_dir:
                         actions.append(action.clone())
                     _, reward, done, _ = wrapper.step(action)
-                    term.on_physics_step = callback
+                    captured = env.recorder_manager.get_term("terminal").values
                 for i in range(min(count, args.episodes - first)):
                     rows.append(dict(scene_id=selected[i][0], candidate_id=selected[i][1],
                         reward=float(reward[i]), **{key: float(value[i]) for key, value in captured.items()}))

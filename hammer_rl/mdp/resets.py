@@ -25,12 +25,13 @@ def initialize_task(env):
                 for key in source.files}
     model = env.sim.mj_model
     ids = torch.arange(env.num_envs, device=env.device)
+    scene_mask = (bank["split"] == (env.cfg.split == "eval")) | (env.cfg.split == "all")
     task = SimpleNamespace(bank=bank, scene_id=ids * 0, candidate_id=ids * 0,
         seed_pos=torch.zeros((env.num_envs, 3), device=env.device),
         seed_quat=torch.zeros((env.num_envs, 4), device=env.device),
         open_ctrl=torch.zeros(env.num_envs, device=env.device),
         depth=torch.zeros((env.num_envs, 1, 120, 160), device=env.device),
-        sampling_weights=((bank["split"] == (env.cfg.split == "eval")).float()),
+        sampling_weights=scene_mask.float(),
         selection=None, hammer_id=model.body("hammer_Object").id,
         handle_geom_id=model.geom("hammer_handle").id,
         spring_joint_ids=torch.tensor([model.joint(f"gripper_hand_{side}2_joint").id
@@ -151,7 +152,7 @@ def bind_candidates(env, env_ids, candidate):
 @requires_model_fields("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
                        recompute=RecomputeLevel.set_const_0)
 def reset_scene(env, env_ids):
-    task, data, model = env.hammer, env.sim.data, env.sim.model
+    task, model = env.hammer, env.sim.model
     bank, count = task.bank, len(env_ids)
     if task.selection is None:
         scene = torch.multinomial(task.sampling_weights, count, replacement=True)
@@ -172,9 +173,16 @@ def reset_scene(env, env_ids):
     model.geom_aabb[env_ids, h, 1, 2] = radius + half_length
     model.body_pos[env_ids, task.hammer_id] = bank["reference_pos"][scene]
     model.body_quat[env_ids, task.hammer_id] = bank["reference_quat"][scene]
-    for name in STATE_FIELDS:
-        getattr(data, name)[env_ids] = bank[name][scene]
-    data.time[env_ids] = 0
     depth = bank["depth"][scene]
     task.depth[env_ids] = task.noise(depth) if env.cfg.visual_noise else depth
+    restore_start(env, env_ids, candidate)
+
+
+def restore_start(env, env_ids, candidate):
+    """从已选场景恢复物理初态，沿用该次 reset 的候选和随机化参数。"""
+    task, data = env.hammer, env.sim.data
+    scene = task.scene_id[env_ids]
+    for name in STATE_FIELDS:
+        getattr(data, name)[env_ids] = task.bank[name][scene]
+    data.time[env_ids] = 0
     bind_candidates(env, env_ids, candidate)

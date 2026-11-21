@@ -5,6 +5,9 @@ from dataclasses import asdict
 from mjlab.rl import RslRlOnPolicyRunnerCfg, RslRlModelCfg, RslRlPpoAlgorithmCfg
 
 
+ROLLOUT_STEPS = 1  # 每次更新的采集批数，可设为 1 或 2，每批 N 条终局样本。
+
+
 def teacher_model():
     return RslRlModelCfg(hidden_dims=(512, 256, 128), activation="elu", obs_normalization=True,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 0.3, "std_type": "scalar"})
@@ -23,7 +26,7 @@ def ppo_cfg(stage="teacher"):
     critic = (RslRlModelCfg(hidden_dims=(256, 128, 64), activation="elu", obs_normalization=True)
               if stage == "teacher" else student_model())
     critic.distribution_cfg = None
-    return RslRlOnPolicyRunnerCfg(num_steps_per_env=1, max_iterations=5000, save_interval=100,
+    return RslRlOnPolicyRunnerCfg(num_steps_per_env=ROLLOUT_STEPS, max_iterations=5000, save_interval=100,
         experiment_name=stage, logger="tensorboard", upload_model=False,
         actor=teacher_model() if stage == "teacher" else student_model(),
         critic=critic,
@@ -39,7 +42,7 @@ def distill_cfg():
         for key in ("rnn_type", "rnn_hidden_dim", "rnn_num_layers"):
             model.pop(key)
     teacher.pop("cnn_cfg")
-    return dict(num_steps_per_env=1, save_interval=50, logger="tensorboard", upload_model=False,
+    return dict(num_steps_per_env=ROLLOUT_STEPS, save_interval=50, logger="tensorboard", upload_model=False,
         obs_groups={"student": ("depth", "public_seed"), "teacher": ("privileged",)},
         student=student, teacher=teacher,
         algorithm=dict(class_name="Distillation", num_learning_epochs=5, gradient_length=1,

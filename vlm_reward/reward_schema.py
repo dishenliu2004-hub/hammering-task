@@ -1,4 +1,4 @@
-"""独立的真实指标目录与 Responses Structured Outputs 契约。"""
+"""真实奖励指标目录与奖励的 Structured Outputs 契约。"""
 
 AVAILABLE_TERMS = {
     "capture": "闭合时两侧接触数量/2，0..1",
@@ -21,29 +21,13 @@ AVAILABLE_TERMS = {
 }
 
 
-def design_schema(available_terms):
+def design_schema():
     return {"type": "object", "additionalProperties": False,
         "required": ["terms", "rationale"], "properties": {
             "terms": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": False,
                 "required": ["id", "weight", "scale", "gate"], "properties": {
-                    "id": {"type": "string", "enum": list(available_terms)},
+                    "id": {"type": "string", "enum": list(AVAILABLE_TERMS)},
                     "weight": {"type": "number"},
                     "scale": {"type": "string", "enum": ["identity"]},
                     "gate": {"type": "string", "enum": ["none", "lift_success", "grasp_before_swing"]}}}},
             "rationale": {"type": "string"}}}
-
-
-def revision_schema():
-    schema = design_schema(AVAILABLE_TERMS)
-    item = schema["properties"]["terms"]["items"]
-    del item["properties"]["scale"]
-    item["required"] = ["id", "weight", "gate", "formula", "params"]
-    item["properties"].update(
-        formula={"type": "string", "enum": ["identity", "power", "prior_gaussian",
-                                            "prior_axis_power", "force_mean_min", "hold_drift"]},
-        params={"type": "array", "items": {"type": "number"}},
-    )
-    for field in ("failure_mode", "expected_effect"):
-        schema["required"].append(field)
-        schema["properties"][field] = {"type": "string"}
-    return schema

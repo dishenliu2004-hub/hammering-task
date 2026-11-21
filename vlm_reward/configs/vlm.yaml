@@ -1,4 +1,3 @@
 model: qwen4-max
 max_output_tokens: 4096
 prompt: prompts/reward_design.md
-depth_range_m: [0.3, 3.0]

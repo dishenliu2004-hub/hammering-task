@@ -96,8 +96,8 @@ def hammer_strike(
     gripper_accel = 10.0  # 夹爪沿路径的固定切向加速度，m/s²
     return_time = 0.45
     carry_z = 0.75
-    lift_time, carry_time, turn_time, lower_time = 2.0, 4.0, 4.0, 2.0
-    settle_time = 1.0
+    lift_time, carry_time, turn_time, lower_time = 1.0, 2.5, 2.5, 1.0
+    settle_time = 0.5
 
     def to_rotation(q):
         return Rotation.from_quat(np.asarray(q)[[1, 2, 3, 0]])

@@ -7,7 +7,7 @@ def score(env, name):
     return env.action_manager.get_term("grasp").values[name]
 
 
-def compute_term(values, term, mapping_prior):
+def compute_term(values, term, mapping_prior, *, swing_observed=True):
     formula, params = term["formula"], term["params"]
     if formula == "identity":
         return values[term["id"]]
@@ -25,16 +25,17 @@ def compute_term(values, term, mapping_prior):
         return alpha * scaled.mean(-1) + (1 - alpha) * scaled.amin(-1)
     if formula == "hold_drift":
         pos_scale, rot_scale = params
-        return values["hold_fraction"] * torch.exp(
+        return swing_observed * values["hold_fraction"] * torch.exp(
             -values["translation_drift"] / pos_scale - values["rotation_drift"] / rot_scale)
 
 
 def recipe(env):
-    values = env.action_manager.get_term("grasp").values
+    grasp = env.action_manager.get_term("grasp")
+    values = grasp.values
     cfg = env.cfg.reward_recipe
     terms = cfg["terms"]
     if cfg.get("version") == "2.0":
-        scores = (compute_term(values, term, cfg["mapping_prior"]) for term in terms)
+        scores = (compute_term(values, term, cfg["mapping_prior"], swing_observed=grasp.swing_observed) for term in terms)
     else:
         scores = (values[term["id"]] for term in terms)
     return sum(term["weight"] * value * (1.0 if term["gate"] == "none" else values[term["gate"]])

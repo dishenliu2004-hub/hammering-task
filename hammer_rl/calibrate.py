@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 
 import torch
-from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 
+from .collection import HammerCollectionEnv
 from .env_cfg import make_env_cfg
 from .inference import load_models
 
@@ -36,7 +36,7 @@ def main():
     cfg = make_env_cfg(config["hammer_head_extra_mass"], data_file=data_file,
         stage=config["stage"], num_envs=args.num_envs, split="train", seed=args.seed, training=False,
         reward_recipe=config.get("reward_recipe"))
-    env = ManagerBasedRlEnv(cfg, device=args.device)
+    env = HammerCollectionEnv(cfg, device=args.device)
     try:
         wrapper = RslRlVecEnvWrapper(env)
         bank = env.hammer.bank

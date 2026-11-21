@@ -29,18 +29,18 @@
 
 ### 1.2 日志统计口径
 
-- **一个环境步就是一次完整尝试**：策略输出一次 6 维完整抓姿动作，随后执行接近、闭合、抬升、搬运、挥击 1、恢复 1、挥击 2、恢复 2、挥击 3、最终卸载和撤离。一个回合包含一个环境步，因此 `Mean episode length = 1.00` 是当前设计的正常结果。
-- 当前场景的物理步长为 `0.002 s`，每次挥击为 160 个子步（`0.32 s`），两次恢复各 `0.8 s`，最终卸载时窗 `1.0 s`，预留撤离时间按代码取整为 `0.44 s`。每个环境步共 `10100` 个物理子步，回合配置时长 `T = 20.20 s`。个别环境可以提前卸载并撤离，但整个环境步仍执行完整子步数。这是**仿真时间**，与终端的采集耗时不同。
+- **一个环境步就是一次完整尝试**：策略输出一次 6 维完整抓姿动作，正常轨迹依次执行接近、闭合、抬升、搬运、挥击 1、恢复 1、挥击 2、恢复 2、挥击 3、最终卸载和撤离。一个回合包含一个环境步，因此 `Mean episode length = 1.00` 是当前设计的正常结果。
+- 当前场景的物理步长为 `0.002 s`，每次挥击为 160 个子步（`0.32 s`），两次恢复各 `0.8 s`，最终卸载时窗 `1.0 s`，预留撤离时间按代码取整为 `0.44 s`。完整轨迹共 `7350` 个物理子步，最长仿真时长 `T = 14.70 s`。训练在锁存掉锤的子步结算并重置该世界，每个世界的实际子步数可不同。这是**仿真时间**，与终端的采集耗时不同。
 - `Episode_Metrics/*`：除 `collect` 外，先取各回合最终缓存的指标，再对本次结束的环境求平均；因此二值指标打印为成功比例，力峰值打印为各回合峰值的平均，而不是全部回合中的最大峰值。未满足门控条件的零值也参与平均。
-- `Episode_Reward/*`：训练入口的 `_RewardLogVecEnvWrapper.step()` 将它们覆盖为 `权重 × 同名 Episode_Metrics`，**不除以回合时长，也不乘时间步长**。它们是十三项原始评分的加权贡献；详见第 4 节。冲量积分中的 `F_n × physics_dt` 用于计算物理量，不是对最终奖励再乘时间步长。
-- `Mean reward`、`Mean episode length`：本机 RSL-RL 的 `rewbuffer` 和 `lenbuffer` 使用最近最多 **128 个已结束回合**的滑动窗口。`Episode_*` 则来自本轮采集的回合统计。默认单进程、128 环境、每轮采集 1 步时，两者覆盖同一批 128 个回合；改变环境数或采集步数后，样本集合可能不同。
+- `Episode_Reward/*`：训练采集按已结束的尝试计算 `权重 × 同名 Episode_Metrics`，**不除以回合时长，也不乘时间步长**。它们是十三项原始评分的加权贡献；详见第 4 节。冲量积分中的 `F_n × physics_dt` 用于计算物理量，不是对最终奖励再乘时间步长。
+- `Mean reward`、`Mean episode length`：本机 RSL-RL 的 `rewbuffer` 和 `lenbuffer` 使用最近最多 **128 个已结束回合**的滑动窗口。`Episode_*` 则来自本轮采集的回合统计。每轮采集 `num_envs × ROLLOUT_STEPS` 次尝试。
 - 下文的 `[a, b]` 包含端点，`[a, b)` 不包含右端点，`∞` 表示没有代码硬上限。表中给出的是单回合取值的边界；相应均值仍落在这些边界内。
 
 ## 2. 训练进度、速度与 PPO 优化指标
 
 | 指标 | 含义与单位 | 数值范围及解读 |
 | --- | --- | --- |
-| `Total steps` | 当前 runner 日志累计记录的环境样本步数，包含所有并行环境。不是物理子步数，也不是更新次数。 | 非负整数，无硬上限。每轮增加 `num_envs × num_steps_per_env × GPU进程数`；单进程、128 环境、每环境采集 1 步时，3584 对应本次 runner 记录了 28 轮采集。续训重新创建 logger 时，此计数从 0 开始，不能直接当作跨进程生命周期的累计步数。 |
+| `Total steps` | 当前 runner 日志累计记录的环境样本步数，包含所有并行环境。不是物理子步数，也不是更新次数。 | 非负整数，无硬上限。每轮增加 `num_envs × num_steps_per_env × GPU进程数`。单进程、128 个世界、`ROLLOUT_STEPS=1` 时，每轮增加 128。续训重新创建 logger 时，此计数从 0 开始，不能直接当作跨进程生命周期的累计步数。 |
 | `Steps per second` | 每秒处理的环境样本数，包含采集和学习耗时。 | 非负整数，无硬上限；实际打印 `int(本轮样本数 / (Collection time + Learning time))`。例如 `int(128 / (16.151 + 0.061)) = 7`。不是物理仿真频率。 |
 | `Collection time` | 本轮采集所用墙钟时间，包含策略采样、环境仿真、重置及采集阶段的记录等。 | `[0, ∞)` 秒。与并行环境数、物理子步数和设备有关，没有固定合格阈值。 |
 | `Learning time` | 本轮学习阶段所用墙钟时间；PPO 包括回报计算与网络更新，蒸馏为行为克隆更新。 | `[0, ∞)` 秒。用于评估训练开销，不直接衡量策略效果。 |
@@ -49,12 +49,12 @@
 | `Mean entropy loss` | 虽然名称带 `loss`，实际打印的是动作分布的平均**微分熵 H**，单位 nat；不是取负后的熵正则项。 | 一般高斯微分熵可为任意实数。当前 6 维高斯、各维标准差默认限制为 `[10⁻⁶, 10⁶]`，所以代码边界约为 `[-74.3794, 91.4067]` nat。可为负；越大表示原始动作分布越分散，没有“越大越好”的固定标准。 |
 | `Mean reward` | 最近最多 128 个已结束回合的实际总奖励均值，当前每回合只有一次奖励。 | force 无硬上限，三次均命中且最终仍持锤另加 100，掉落项权重为 −30；详见第 5 节；不是百分比，也没有归一化到 `[0,1]`。在相同配置和评估分布下通常越大越好。 |
 | `Train/total_reward` | 本轮采集的实际总奖励均值，不使用 128 回合滑动窗口。 | 与单回合总奖励具有相同边界，等于同批次十三项加权奖励之和。 |
-| `Mean episode length` | 最近最多 128 个已结束回合的平均环境步数。 | 当前有效回合恒为 `1`。单位是环境步，不是秒，也不是 10100 个物理子步。 |
+| `Mean episode length` | 最近最多 128 个已结束回合的平均环境步数。 | 当前有效回合恒为 `1`。一次尝试最多执行 7350 个物理子步。 |
 | `Mean action std` | 策略高斯动作分布在各动作维度上的标准差均值，描述探索幅度。 | 当前默认 `[10⁻⁶, 10⁶]`，初值为 `0.3`。这是 `tanh` 前无量纲动作的标准差，不是 `0.30 m` 或 `0.30 rad`；策略输出随后转换为完整抓姿。 |
 
 当前动作先经过 `tanh`：前三维在锤子局部坐标系中生成抓持中心，X 轴尺度为锤柄半长、Y/Z 轴尺度为锤柄半径；后三维向量 v 转换为轴角 `π v / max(||v||, 1)`，再与初始锤子姿态组合。TCP 偏移用于换算 mount 位姿，预抓位置沿接近方向后退 `0.10 m`。标准差本身不等于执行后的米制或角度误差；熵和 PPO 动作概率均对应 `tanh` 前的高斯分布。
 
-`Mean value loss`、`Mean surrogate loss`、`Mean entropy loss` 只属于两个 PPO 阶段。当前 PPO 初始学习率 `3e-4`，Adam 优化器，每轮 `5` 个 epoch、每个 epoch `4` 个 mini-batch；默认 128 环境时每批 32 条尝试，共 20 次梯度更新。采用自适应学习率，目标 KL 为 `0.01`，学习率调整边界为 `[1e-5, 1e-2]`；最大梯度范数为 `1.0`，优势默认在整轮采集数据上归一化。折扣 `gamma=0.99`、GAE `lam=0.95`，但当前每步为真实 terminal，不会跨尝试 bootstrap，单步目标回报就是本次奖励。
+`Mean value loss`、`Mean surrogate loss`、`Mean entropy loss` 只属于两个 PPO 阶段。当前 PPO 初始学习率 `3e-4`，Adam 优化器，每轮 `5` 个 epoch、每个 epoch `4` 个 mini-batch；默认 128 环境时每个 mini-batch 有 64 条尝试，共 20 次梯度更新。采用自适应学习率，目标 KL 为 `0.01`，学习率调整边界为 `[1e-5, 1e-2]`；最大梯度范数为 `1.0`，优势默认在整轮采集数据上归一化。折扣 `gamma=0.99`、GAE `lam=0.95`，但当前每步为真实 terminal，不会跨尝试 bootstrap，单步目标回报就是本次奖励。
 
 PPO 的主要公式为：
 
@@ -102,9 +102,9 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 
 ## 3. 任务原始指标：Episode_Metrics
 
-关键时点：闭合结束约 `2.4 s`；抬升结束为快照 **A**，约 `3.2 s`；挥击前快照约 `16.2 s`。这些均为每次尝试内的仿真时间。
+关键时点：闭合结束约 `2.4 s`；抬升结束为快照 **A**，约 `3.2 s`；挥击前快照约 `10.7 s`。这些均为每次尝试内的仿真时间。
 
-默认三次挥击的子步区间分别对应 `(16.20, 16.52] s`、`(17.32, 17.64] s`、`(18.44, 18.76] s`；两次恢复结束时点为 `17.32 s`、`18.44 s`。第三次挥击后才进入最终卸载，固定卸载窗口截止于 `19.76 s`，最迟在其后进入撤离。各时点由物理子步数确定。
+默认三次挥击的子步区间分别对应 `(10.70, 11.02] s`、`(11.82, 12.14] s`、`(12.94, 13.26] s`；两次恢复结束时点为 `11.82 s`、`12.94 s`。第三次挥击后才进入最终卸载，固定卸载窗口截止于 `14.26 s`，最迟在其后进入撤离。各时点由物理子步数确定。
 
 | 指标 | 含义、计算时点与单位 | 单回合范围 | 注释 |
 | --- | --- | --- | --- |
@@ -177,7 +177,7 @@ L_behavior = mean((μ_student(depth, public_seed) - μ_teacher(privileged))²)
 
 **距离**：`p_grip` 为 A 时刻两指尖中点，`p_head = p_hammer − 0.24 h_A`。奖励使用有符号柄轴投影，横向偏移不增加 distance。
 
-**稳定性**：闭合结束（约 2.4 s）保存夹爪系锤体位姿，在挥击前（约 16.2 s）计算 `ep = ||p_rel(pre_swing) − p_rel(closure)||`、`er = angle(q_rel(closure), q_rel(pre_swing))`。不读取中间过程或挥击开始之后的位姿漂移。A 快照仍用于原有挥击轨迹规划。归一化误差为：
+**稳定性**：闭合结束（约 2.4 s）保存夹爪系锤体位姿，在挥击前（约 10.7 s）计算 `ep = ||p_rel(pre_swing) − p_rel(closure)||`、`er = angle(q_rel(closure), q_rel(pre_swing))`。不读取中间过程或挥击开始之后的位姿漂移。A 快照仍用于原有挥击轨迹规划。归一化误差为：
 
 ```text
 x = sqrt(0.5 × ((ep / stability_position_scale)²
@@ -234,7 +234,7 @@ force = 0.5 × (f_1 + f_2 + f_3) / 3 + 0.5 × min(f_1, f_2, f_3)
 
 ### 4.2 加权奖励的日志统计
 
-当前训练入口 `_RewardLogVecEnvWrapper` 动态遍历 cfg.rewards，覆盖所有十三项奖励日志：
+训练入口按 `cfg.rewards` 汇总每项奖励。
 
 ```text
 Episode_Reward/name = weight_name × Episode_Metrics/name
@@ -257,7 +257,7 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 
 除 force、task_success 外的正奖励宽松上界为 112；完整成功另加 100，force 的加权贡献为 `20 × force`，无硬上限。总奖励的宽松代数包络为 `[-30 − 76/55, ∞)`，各门控相关，不保证每个值可达。抬升失败时仍可获得 capture 和双侧接触下的部分 lift_progress。wrap 可为负且上界为 `5/3`；其余正向原始评分除 force 外均在 `[0,1]`。原始 hit_count 的范围为 `[0,3]`，但只通过除以 3 后的 hit_progress 加入奖励。
 
-训练日志直接满足 `sum(Episode_Reward/*) = Train/total_reward`，无需乘回合时长 20.20 s。默认单进程、128 环境、每轮采集一步时 Mean reward 与该和应在打印精度内一致；环境数改变后，128 回合滑动窗口与本轮指标样本集合可能不同。
+训练日志直接满足 `sum(Episode_Reward/*) = Train/total_reward`，无需乘回合时长 14.70 s。该和覆盖本轮全部尝试，`Mean reward` 取日志最近收到的最多 128 条。
 
 | 指标 | 含义 | 数值范围及解读 |
 | --- | --- | --- |
@@ -265,13 +265,13 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 | `Curriculum/scene_sgs/sgs_mean_probability` | 全部训练场景的归一化采样概率均值。 | 有 N 个训练场景时为 `1/N`，不是成功率或每批整数名额。 |
 | `Curriculum/scene_sgs/sgs_min_probability` / `Curriculum/scene_sgs/sgs_max_probability` | 全部训练场景采样概率的最小值与最大值。 | 位于 `[0,1]`，首次更新前均为 `1/N`；默认均匀混合后每个训练场景概率至少为 `0.2/N`。评估场景不参与这些统计。M 个重置环境对场景 i 的预期采样数为 `M*q_i`，实际数量可波动。 |
 | `Curriculum/scene_sgs/sgs_observed_scenes` | 有完成回合历史的训练场景数。 | 整数 `[0,N]`；同场景的并行完成回合全部计入最近 100 条历史。 |
-| `Episode_Termination/attempt_complete` | 本次重置的环境中，满足 `episode_length_buf >= 1` 的数量，表示一次尝试正常结束。 | 单次统计为整数 `[0, num_envs]`；日志还会对本轮各次统计求均值，因此格式可带小数。当前 128 个并行环境每步都结束一个回合，通常为 128；它是**结束数量**，不是成功数量，也不是百分比。 |
+| `Episode_Termination/attempt_complete` | 提交给 runner 的每批真实终局样本数，含掉锤与走完轨迹的尝试。 | 每批 N 条，一轮提交两批。 |
 
-教师从第一次 reset 起开放全部训练场景，reset 仍只从离线连续稳定位姿缓存抽样。课程在 reset 事件和动作评分清零前读取旧 `scene_id` 及最终 `task_success`，每个训练场景单独保存最近 100 条二值成功历史；评估场景不累计历史。场景成功率 `p_i` 为历史均值，无历史时以 0.5 计算优先级。首次更新前在训练场景间均匀采样，此后每 10 个含完成回合的批次更新一次，无额外热身。
+教师从第一次 reset 起开放全部训练场景，reset 仍只从离线连续稳定位姿缓存抽样。课程在 reset 事件和动作评分清零前读取旧 `scene_id` 及最终 `task_success`，每个训练场景单独保存最近 100 条二值成功历史；评估场景不累计历史。场景成功率 `p_i` 为历史均值，无历史时以 0.5 计算优先级。首次更新前在训练场景间均匀采样，此后按每 N 个已完成尝试计一批，每 10 批更新一次，无额外热身。
 
 默认 `t=0.0`、`kappa=1.0`、`T=1.0`、`eps=1e-4`、`uniform_mix=0.2`，仅在训练场景间计算 `w_i = (p_i+eps)^(kappa*t) × (1-p_i+eps)^(kappa*(1-t))`、`logit_i = log(max(w_i,eps)+eps)/T`，再用 `q_adaptive = softmax(logit)` 得到自适应概率，最终 `q_i = 0.8 × q_adaptive_i + 0.2/N_train`。成功率越接近 0，场景优先级越高；忽略数值处理项时，80% 的采样概率按失败率分配，其余 20% 均匀分配给全部训练场景。每个训练场景直接使用 `q_i` 作为采样权重，评估场景权重为零。SGS 仅依据成功历史，原有奖励及力、冲量指标保持不变。参数以 `run_config.json` 的 `scene_sgs` 为准；checkpoint 的 `infos["scene_sgs"]` 保存逐场景历史、按训练场景行号递增顺序排列的概率及完成批次计数。普通 `--resume` 恢复该状态；旧配置切换到当前策略须显式使用 `--reset-scene-sgs --data-file 场景缓存路径`，清空课程并采用当前参数和本次数据路径，可沿用原缓存，不迁移旧课程状态。
 
-`attempt_complete` 配置为正常 terminal，`time_out=False`，环境还设置 `is_finite_horizon=True`；抬升失败、掉落、未命中同样执行到完整环境步结束，不产生独立的失败终止日志。PPO 不将下一次 reset 后的初始状态作为本次尝试的 bootstrap 价值。
+掉锤和走完轨迹都以真实终局提交，PPO 的单步目标回报就是该次奖励。未成功抬升或单次未命中仍按原轨迹推进。首次挥击前掉锤时，`hold_fraction` 用已累计的有效持有步数除以原定窗口步数，尚未采样的稳定性和配方 `hold_drift` 为零。
 
 ## 6. 如何解读训练和评估结果
 
@@ -294,6 +294,6 @@ R = 2 capture + 3 lift_progress + 10 lift_success + 5 grasp_before_swing
 - [包络和顶靠几何评分](../generation/enclosure.py)：真包络与顶靠判据、角度评分。
 - [奖励读取](mdp/rewards.py)、[终止条件](mdp/terminations.py)、[课程逻辑](mdp/curriculum.py)。
 - [观测读取](mdp/observations.py)、[重置与观测构造](mdp/resets.py)：66/34 维观测、冻结深度和随机化。
-- [网络与算法配置](rl_cfg.py)、[训练入口](train.py)：教师/学生网络、PPO/蒸馏参数、每次采集步数、课程命令行默认值，以及 `_RewardLogVecEnvWrapper` 的加权奖励日志覆盖逻辑。
+- [网络与算法配置](rl_cfg.py)、[训练入口](train.py)：教师/学生网络、PPO/蒸馏参数、每次采集步数、课程命令行默认值，以及按终局样本汇总加权奖励的逻辑。
 - [评估入口](evaluate.py)：直接抓姿的确定性评估、零动作对照与逐回合原始指标；[场景总体对比](compare_evaluations.py) 保留的是旧版候选对比调用，尚未适配当前评估参数。
 - 本机框架源码位于 `/home/ubuntu20/anaconda3/envs/hammer/lib/python3.11/site-packages/` 下：`mjlab/managers/{metrics,reward,termination}_manager.py` 定义底层日志聚合；`mjlab/rl/config.py` 定义 PPO 默认值；`rsl_rl/utils/logger.py` 定义吞吐、128 回合滑动窗口与打印；`rsl_rl/algorithms/{ppo,distillation}.py`、`rsl_rl/models/{mlp_model,cnn_model}.py`、`rsl_rl/modules/{distribution,cnn}.py` 定义损失、网络、熵与标准差边界。
