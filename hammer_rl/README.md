@@ -30,10 +30,10 @@ export MPLBACKEND=Agg
 
 ## 2. 准备训练数据
 
-使用已有的 256 场景训练缓存。映射图复用工作区的 ContactPose 锤击样例。 [ContactPose 数据说明](人工奖励函数运行说明.md#历史-contactpose-实验)
+使用已有的 256 场景训练缓存。映射编码复用工作区的 ContactPose 锤击样例。 [ContactPose 数据说明](人工奖励函数运行说明.md#历史-contactpose-实验)
 
 ```bash
-bank=weight/hammer_rl/reset_bank_v1_256.npz
+bank=weight/hammer_rl/reset_bank_direct_256.npz
 run_dir="weight/hammer_rl/runs/teacher/vlm_$(date +%Y%m%d_%H%M%S)"
 
 if [ ! -f "$bank" ]; then
@@ -43,7 +43,7 @@ fi
 
 ## 3. 查看抓姿预览并确认训练
 
-将 `hand_image` 改为实际的人手抓锤照片路径。`mapping` 将 ContactPose 抓持先验映射到 OmniPicker 并生成对照图。VLM 读取映射图和人手照片，为整个训练缓存生成一份奖励配方。 [奖励提示词](../vlm_reward/prompts/reward_design.md)
+将 `hand_image` 改为实际的人手抓锤照片路径。`mapping` 将 ContactPose 抓持先验映射到 OmniPicker 并导出结构化 latent。VLM 读取 latent 和人手照片，为整个训练缓存生成一份奖励配方，并选择关键点对照图要展示的候选位姿。 [奖励提示词](../vlm_reward/prompts/reward_design.md)
 
 ```bash
 hand_image="/home/ubuntu20/下载/1.png"
@@ -56,7 +56,29 @@ env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy \
   --output-dir "$run_dir"
 ```
 
-命令保存 `mapping.json`、`grasp_preview.png` 和 `reward_v1.json` 后暂停。打开预览核对人手骨架、接触区域和夹爪开爪位姿，然后回到原终端输入 `yes` 启动训练。直接回车可取消。
+这是可视化查看立体3维人手和夹爪关键点对应的指令
+```bash
+python -m visualization.keypoint_preview \
+  --mapping weight/hammer_rl/runs/teacher/vlm_20261123_195647/mapping.json \
+  --candidate 0 --show
+```
+
+命令保存 `mapping.json`、`grasp_preview.png` 和 `reward_v1.json` 后暂停。核对同色指尖的对应关系及夹爪开爪位姿后，回到原终端输入 `yes` 启动训练。直接回车可取消。
+
+在另一个已激活 `hammer` 环境的终端，从项目根目录运行下列命令打开交互窗口。把 `run_dir` 设为要查看的运行目录，`--candidate` 可取 `0` 或 `1`，VLM 选中的下标见 `reward_v1.json` 的 `generation.preview_candidate`。左键拖动任一视图，两侧会同步旋转。
+
+```bash
+run_dir=weight/hammer_rl/runs/teacher/vlm_20261123_195647
+python -m visualization.keypoint_preview --mapping "$run_dir/mapping.json" \
+  --candidate 0 --show
+```
+
+要导出静态图，可使用 `--output`。
+
+```bash
+python -m visualization.keypoint_preview --mapping "$run_dir/mapping.json" \
+  --candidate 0 --output "$run_dir/grasp_preview_0.png"
+```
 
 预览使用缓存中锤柄尺寸的均值。Teacher 从全部 256 个场景采样，沿用各场景的 AnyGrasp 候选和固定锤击轨迹，全程使用同一份奖励配方。
 

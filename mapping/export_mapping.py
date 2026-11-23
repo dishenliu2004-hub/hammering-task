@@ -1,4 +1,4 @@
-"""把 ContactPose 锤击先验映射到 OmniPicker，导出 JSON 和抓姿图。"""
+"""把 ContactPose 锤击先验映射到 OmniPicker，导出几何 latent JSON。"""
 
 import argparse
 import json
@@ -8,7 +8,6 @@ import numpy as np
 import yaml
 
 from .contactpose_reader import read_records
-from .grasp_preview import save_preview
 from .mapping_encoder import encode
 from .omnipicker_adapter import gripper_description
 
@@ -28,13 +27,13 @@ def main():
                 source="contactpose")
     with np.load(args.data_file) as bank:
         handle_size = bank["handle_size"].mean(axis=0).tolist()
-    code = encode(hand, gripper_description(ROOT / config["gripper_xml"]), handle_size)
-
-    participant = source["source"]["records"][0]["participant_id"]
-    record = next(read_records(ROOT / "data/human_grasp/source/contactpose", "hammer", [participant]))
+    sample = source["source"]["records"][0]
+    record = next(read_records(ROOT / "data/human_grasp/source/contactpose",
+                               sample["object_name"], [sample["participant_id"]]))
+    latent = encode(hand, gripper_description(ROOT / config["gripper_xml"]), handle_size,
+                    record=record, source_coordinates=source["coordinates"])
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(code, indent=2, ensure_ascii=False) + "\n")
-    save_preview(code, source, record, args.output.with_name("grasp_preview.png"))
+    args.output.write_text(json.dumps(latent, indent=2, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":

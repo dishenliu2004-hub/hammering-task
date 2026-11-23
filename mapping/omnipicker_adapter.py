@@ -29,9 +29,26 @@ def home_gripper_reference(data):
     return reference, home_tcp_offset
 
 
+def gripper_skeleton(data):
+    base = data.body("base_link")
+    points = [base.xpos]
+    links, loops, tips = [], [], {}
+    for side, site in zip(FINGER_SIDES, CONTACT_SITES):
+        first, second, third, tip, loop_joint, loop_end = range(len(points), len(points) + 6)
+        points.extend(data.joint(f"hand_{side}{i}_joint").xanchor for i in (1, 2, 3))
+        points.extend((data.site(site).xpos, data.joint(f"hand_{side}_loop_joint").xanchor,
+                       data.site(f"hand_{side}_loop_tip").xpos))
+        links.extend(((0, first), (first, second), (second, third), (third, tip)))
+        loops.extend(((0, loop_joint), (loop_joint, loop_end), (loop_end, third)))
+        tips[site] = tip
+    local_points = (np.asarray(points) - base.xpos) @ base.xmat.reshape(3, 3)
+    return local_points, links, loops, tips
+
+
 def gripper_description(xml):
     model, data = load_gripper_home(xml)
     reference, home_tcp_offset = home_gripper_reference(data)
+    points, links, loops, tips = gripper_skeleton(data)
     geom_names = [model.geom(i).name for i in range(model.ngeom)
                   if model.geom_contype[i] or model.geom_conaffinity[i]]
     springs = [i for i in range(model.njnt) if model.jnt_stiffness[i] > 0]
@@ -46,4 +63,4 @@ def gripper_description(xml):
                              springref=float(model.qpos_spring[model.jnt_qposadr[i]])) for i in springs],
         equalities=[dict(name=model.equality(i).name, type=int(model.eq_type[i]),
                          data=model.eq_data[i].tolist()) for i in range(model.neq)],
-        source_xml=str(xml))
+        keypoints_G_m=points.tolist(), links=links, loop_links=loops, contact_keypoint_indices=tips)

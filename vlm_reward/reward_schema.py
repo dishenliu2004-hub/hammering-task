@@ -23,11 +23,12 @@ AVAILABLE_TERMS = {
 
 def design_schema():
     return {"type": "object", "additionalProperties": False,
-        "required": ["terms", "rationale"], "properties": {
+        "required": ["terms", "rationale", "preview_candidate"], "properties": {
             "terms": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": False,
                 "required": ["id", "weight", "scale", "gate"], "properties": {
                     "id": {"type": "string", "enum": list(AVAILABLE_TERMS)},
                     "weight": {"type": "number"},
                     "scale": {"type": "string", "enum": ["identity"]},
                     "gate": {"type": "string", "enum": ["none", "lift_success", "grasp_before_swing"]}}}},
-            "rationale": {"type": "string"}}}
+            "rationale": {"type": "string"},
+            "preview_candidate": {"type": "integer", "enum": [0, 1]}}}

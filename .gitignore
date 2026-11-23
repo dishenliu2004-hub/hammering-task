@@ -29,3 +29,6 @@ MUJOCO_LOG.TXT
 
 # ContactPose 原始子集（离线 JSON 产物可单独保留）
 /data/human_grasp/source/
+
+/docs/hammering-task_password.txt
+/docs/qwen-api-key.txt

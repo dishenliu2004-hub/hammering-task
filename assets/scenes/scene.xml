@@ -42,7 +42,7 @@
         </body>
 
         <!-- 圆柱体 -->
-        <frame pos="-0.37 0.10 -0.015">
+        <frame pos="0 0.10 -0.015">
             <attach model="cylinder"
                     body="graspable_cylinder"
                     prefix="cylinder_" />
