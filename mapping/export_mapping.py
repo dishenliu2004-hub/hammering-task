@@ -32,6 +32,7 @@ def main():
                                sample["object_name"], [sample["participant_id"]]))
     latent = encode(hand, gripper_description(ROOT / config["gripper_xml"]), handle_size,
                     record=record, source_coordinates=source["coordinates"])
+    latent.update(contact_prior=prior, task_context=source["task_context"])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(latent, indent=2, ensure_ascii=False) + "\n")
 

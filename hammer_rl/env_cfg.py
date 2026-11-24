@@ -167,6 +167,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         cfg.reward_recipe = json.loads(Path(reward_recipe).read_text())
         cfg.rewards = {"recipe": RewardTermCfg(func=rewards.recipe, weight=1.0)}
         cfg.metrics.update({name: MetricsTermCfg(func=rewards.score,
-            params={"name": name}, reduce="last") for name in ("prior_region", "prior_axis")})
+            params={"name": name}, reduce="last")
+            for name in ("prior_region", "prior_axis", "grasp_u_rl", "grasp_axis_cos2")})
         cfg.metrics["recipe"] = MetricsTermCfg(func=rewards.recipe, reduce="last")
     return cfg

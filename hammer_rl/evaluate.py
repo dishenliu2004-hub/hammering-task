@@ -36,6 +36,13 @@ def save_feedback(env, wrapper, data, rows, actions, directory):
     pairs = [(rows[i]["scene_id"], rows[i]["candidate_id"]) for i in indices]
     term = env.action_manager.get_term("grasp")
     stages = {getattr(term, stage): stage for stage in ("closure_end", "lift_end", "swing_start", "swing_end")}
+    outcome_names = (
+        "lift_success", "grasp_before_swing", "wrap", "seat_closure", "seat_lift", "seat_before_swing",
+        "stability", "translation_drift", "rotation_drift", "drop", "recovery_hold", "strike_force_1",
+        "strike_force_2", "strike_force_3", "task_success", "hit_progress", "hold_fraction",
+    )
+    if env.cfg.reward_recipe is not None:
+        outcome_names += ("prior_region", "prior_axis", "grasp_u_rl", "grasp_axis_cos2")
     directory.mkdir(parents=True, exist_ok=True)
     index = []
     with mujoco.Renderer(env.sim.mj_model, height=240, width=320) as renderer:
@@ -56,8 +63,7 @@ def save_feedback(env, wrapper, data, rows, actions, directory):
                                                           candidate_id=row["candidate_id"], stage=stage, file=filename))
                 if grasp._substep == env.cfg.decimation:
                     for env_id, episode in enumerate(batch):
-                        outcome = {key: float(grasp.values[key][env_id]) for key in
-                                   ("task_success", "hold_fraction", "hit_progress")}
+                        outcome = {key: float(grasp.values[key][env_id]) for key in outcome_names}
                         index.extend(dict(frame, **outcome) for frame in batch_frames[episode])
 
             term.on_physics_step = capture

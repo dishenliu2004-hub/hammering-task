@@ -20,15 +20,48 @@ AVAILABLE_TERMS = {
     "prior_axis": "抬升末帧实际Site对向轴与映射轴点积平方，0..1且有效抬升门控",
 }
 
+AVAILABLE_FORMULAS = {
+    "identity": "[]，直接读取 id 对应的指标",
+    "power": "[exponent]，将 id 对应的指标截断到 0..1 后取正指数幂",
+    "prior_gaussian": "[sigma_scale]，prior_region 使用 grasp_u_rl 与 u_mean_RL 的 Gaussian 匹配，宽度为 u_sigma_RL 乘以正的 sigma_scale",
+    "prior_axis_power": "[exponent]，prior_axis 使用 grasp_axis_cos2 的正指数幂",
+    "force_mean_min": "[alpha, force_ref_n]，force 取三次 log1p(敲击力/force_ref_n) 的均值与最小值，"
+                      "权重分别为 alpha 和 1-alpha。alpha 为 0..1，force_ref_n 为正的牛顿数",
+    "hold_drift": "[position_scale, rotation_scale]，stability 在挥击前快照已记录时取 hold_fraction × "
+                  "exp(-translation_drift/position_scale - rotation_drift/rotation_scale)。两个尺度分别为正的米数和弧度数",
+}
+
+
+def _recipe_schema(**fields):
+    properties = {
+        "terms": {"type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "weight", "formula", "params", "gate"], "properties": {
+                "id": {"type": "string", "enum": list(AVAILABLE_TERMS)},
+                "weight": {"type": "number"},
+                "formula": {"type": "string", "enum": list(AVAILABLE_FORMULAS)},
+                "params": {"type": "array", "items": {"type": "number"}},
+                "gate": {"type": "string", "enum": ["none", "lift_success", "grasp_before_swing"]},
+            },
+        }},
+        "rationale": {"type": "string"},
+        **fields,
+    }
+    return {"type": "object", "additionalProperties": False,
+            "required": list(properties), "properties": properties}
+
 
 def design_schema():
-    return {"type": "object", "additionalProperties": False,
-        "required": ["terms", "rationale", "preview_candidate"], "properties": {
-            "terms": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": False,
-                "required": ["id", "weight", "scale", "gate"], "properties": {
-                    "id": {"type": "string", "enum": list(AVAILABLE_TERMS)},
-                    "weight": {"type": "number"},
-                    "scale": {"type": "string", "enum": ["identity"]},
-                    "gate": {"type": "string", "enum": ["none", "lift_success", "grasp_before_swing"]}}}},
-            "rationale": {"type": "string"},
-            "preview_candidate": {"type": "integer", "enum": [0, 1]}}}
+    return _recipe_schema(preview_candidate={"type": "integer", "enum": [0, 1]})
+
+
+def reflection_schema():
+    return _recipe_schema(mapping_prior={
+        "type": "object", "additionalProperties": False,
+        "required": ["u_mean_RL", "u_sigma_RL", "closing_axis_O"], "properties": {
+            "u_mean_RL": {"type": "number"},
+            "u_sigma_RL": {"type": "number"},
+            "closing_axis_O": {"type": "array", "minItems": 3, "maxItems": 3,
+                               "items": {"type": "number"}},
+        },
+    })

@@ -1,4 +1,4 @@
-"""从映射 latent 和抓锤照片设计一份奖励，确认后启动 Teacher。"""
+"""从映射 latent 和抓锤照片设计初始奖励，确认后启动 Teacher 奖励进化。"""
 
 import argparse
 import json
@@ -13,7 +13,7 @@ from PIL import Image, ImageOps
 from visualization.keypoint_preview import save_preview
 
 from .api_client import design
-from .reward_schema import AVAILABLE_TERMS, design_schema
+from .reward_schema import AVAILABLE_FORMULAS, AVAILABLE_TERMS, design_schema
 from .rgbd_context import image_input
 
 ROOT = Path(__file__).resolve().parent
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent
 
 def assemble_recipe(design_result, mapping, *, recipe_id, mapping_ref, profile_id):
     mapped = mapping["mapped_grasp"]
-    return dict(version="1.0", recipe_id=recipe_id, task_id="hammer",
+    return dict(version="2.0", recipe_id=recipe_id, task_id="hammer",
         mapping_ref=mapping_ref, profile_id=profile_id, **design_result,
         mapping_prior=dict(u_mean_RL=mapped["preferred_u_RL"], u_sigma_RL=mapped["u_sigma_RL"],
                            closing_axis_O=mapped["preferred_closing_axis_O"]))
@@ -36,7 +36,8 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/vlm.yaml")
     parser.add_argument("--num-envs", type=int, default=512)
-    parser.add_argument("--max-iterations", type=int, default=5000)
+    parser.add_argument("--max-iterations", type=int, default=5000, help="每个训练阶段的 PPO update 数")
+    parser.add_argument("--evolution-rounds", type=int, default=1, help="初始奖励之后的 VLM 奖励修正次数")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
@@ -52,7 +53,7 @@ def main():
     with Image.open(args.hand_image) as photo:
         images = [image_input(ImageOps.exif_transpose(photo).convert("RGB"))]
     context = {"task_id": "hammer", "description": args.description, "available_terms": AVAILABLE_TERMS,
-               "mapping_latent": mapping}
+               "available_formulas": AVAILABLE_FORMULAS, "mapping_latent": mapping}
     result, response_id = design(config, (ROOT / config["prompt"]).read_text(), context, images,
         schema=design_schema(), name="reward_design")
     candidate_index = result.pop("preview_candidate")
@@ -68,12 +69,13 @@ def main():
     if input("查看预览后输入 yes 开始训练，直接回车取消：").strip() == "yes":
         with np.load(data_file) as bank:
             extra_mass = float(bank["hammer_head_extra_mass"])
-        subprocess.run([sys.executable, "-m", "hammer_rl.train", "--stage", "teacher",
-                        "--data-file", str(data_file), "--split", "all", "--reward-recipe", str(recipe_path),
+        subprocess.run([sys.executable, "-m", "vlm_reward.reward_evolution",
+                        "--initial-recipe", str(recipe_path), "--mapping", str(mapping_path),
+                        "--data-file", str(data_file), "--output-dir", str(output), "--config", str(args.config),
+                        "--evolution-rounds", str(args.evolution_rounds),
                         "--hammer-head-extra-mass", str(extra_mass),
                         "--num-envs", str(args.num_envs), "--max-iterations", str(args.max_iterations),
-                        "--seed", str(args.seed), "--device", args.device,
-                        "--log-dir", str(output / "teacher")], check=True)
+                        "--seed", str(args.seed), "--device", args.device], check=True)
 
 
 if __name__ == "__main__":
