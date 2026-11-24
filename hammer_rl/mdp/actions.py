@@ -13,17 +13,22 @@ from mjlab.utils.lab_api.math import (axis_angle_from_quat, quat_apply, quat_app
 
 from generation.enclosure import build_enclosure_geometry, compute_enclosure_score, compute_handle_seating
 from generation.hammer_geometry import HEAD_CENTER_LOCAL, STRIKE_FACE_CENTER_LOCAL
-from .resets import initialize_task
+from .resets import initialize_task, pregrasp_position
+from .rewards import force_mean_min
 
 DT = 0.02
 PRE_SWING_MOVE_DURATIONS = (1.0, 0.6, 0.50, 0.40, 0.50, 1.5, 1.5, 0.60)
 PRE_SWING_HOLD_DURATION = 0.5
 
 
+def _swing_height(s):
+    return 0.30 * (1 - s * s) + 0.10 * s * (1 - s)
+
+
 def swing_schedule(physics_dt):
     # 仅构造时使用 NumPy；与原脚本完全相同的 1001 点弧长表。
     s = np.linspace(0.0, 1.0, 1001)
-    points = np.column_stack((0.40 * s, 0.30 * (1 - s * s) + 0.10 * s * (1 - s)))
+    points = np.column_stack((0.40 * s, _swing_height(s)))
     length = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))]
     duration = math.sqrt(2.0 * length[-1] / 10.0)
     steps = round(duration / DT)
@@ -35,17 +40,20 @@ def _pre_swing_substeps(physics_dt):
     return move_substeps + round(PRE_SWING_HOLD_DURATION / physics_dt)
 
 
+def _attempt_timing(physics_dt, swing_len, unload_time, num_strikes, recover_time):
+    swing_start = _pre_swing_substeps(physics_dt)
+    recovery_steps = round(recover_time / physics_dt)
+    swing_end = swing_start + num_strikes * swing_len + (num_strikes - 1) * recovery_steps
+    unload_end = swing_end + round(unload_time / physics_dt)
+    return_steps = round(0.45 / DT) * round(DT / physics_dt)
+    return swing_start, recovery_steps, swing_end, unload_end, return_steps
+
+
 def attempt_substeps(physics_dt, unload_time, num_strikes=3, recover_time=0.8):
     *_, steps, substeps = swing_schedule(physics_dt)
-    swing_len = steps * substeps
-    recover_len = round(recover_time / physics_dt)
-    return (
-        _pre_swing_substeps(physics_dt)
-        + num_strikes * swing_len
-        + (num_strikes - 1) * recover_len
-        + round(unload_time / physics_dt)
-        + round(0.45 / DT) * round(DT / physics_dt)
-    )
+    *_, unload_end, return_steps = _attempt_timing(
+        physics_dt, steps * substeps, unload_time, num_strikes, recover_time)
+    return unload_end + return_steps
 
 
 def _rotation_delta(start, end):
@@ -91,10 +99,7 @@ def refine_pose(seed_pos, seed_quat, actions, cfg):
     final_pos = seed_pos + quat_apply(seed_quat, delta[:, :3] * cfg.position_scale)
     local_rotation = quat_box_plus(identity, delta[:, 3:] * cfg.rotation_scale)
     final_quat = quat_mul(seed_quat, local_rotation)
-    approach = torch.zeros_like(seed_pos)
-    approach[:, 2] = 1
-    pregrasp = final_pos - 0.10 * quat_apply(final_quat, approach)
-    return final_pos, final_quat, pregrasp
+    return final_pos, final_quat, pregrasp_position(final_pos, final_quat)
 
 
 class GraspResidualAction(ActionTerm):
@@ -132,17 +137,11 @@ class GraspResidualAction(ActionTerm):
         self.palm_frames = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.seat_frames = torch.zeros_like(self.palm_frames)
         self.closure_enclosure = torch.zeros(env.num_envs, device=self.device)
-        self.swing_start = _pre_swing_substeps(env.physics_dt)
         self.swing_len = self.swing_steps * self.swing_substeps
-        self.recovery_steps = round(cfg.recover_time / env.physics_dt)
+        (self.swing_start, self.recovery_steps, self.swing_end,
+         self.unload_end, self.return_steps) = _attempt_timing(
+            env.physics_dt, self.swing_len, cfg.unload_time, cfg.num_strikes, cfg.recover_time)
         self.cycle_steps = self.swing_len + self.recovery_steps
-        self.swing_end = (
-            self.swing_start
-            + cfg.num_strikes * self.swing_len
-            + (cfg.num_strikes - 1) * self.recovery_steps
-        )
-        self.unload_end = self.swing_end + round(cfg.unload_time / env.physics_dt)
-        self.return_steps = round(0.45 / DT) * self.substeps
         self.on_physics_step = None  # 仅评估安装，训练路径没有 CPU 同步。
         self._substep = 0
         self._world_mask = None
@@ -297,7 +296,7 @@ class GraspResidualAction(ActionTerm):
 
     def _swing_pose(self, s):
         angle = -math.pi / 3 * (1 - s)
-        height = 0.30 * (1 - s * s) + 0.10 * s * (1 - s)
+        height = _swing_height(s)
         distance = 0.40 * (1 - s)
         if isinstance(s, torch.Tensor):
             angle, height, distance = angle.float(), height.float(), distance.float()
@@ -518,10 +517,13 @@ class GraspResidualAction(ActionTerm):
         # 按 A 快照规划后续固定挥击轨迹，同时准备后面投影接触力所需的目标端面法向。
         self._plan_strike()
 
+    def hold_fraction(self, env_ids=slice(None)):
+        return self.hold_steps[env_ids].float() / (self.swing_start - self.lift_end)
+
     def _swing_snapshot(self, k):
         values, bilateral = self.values, self.bilateral
         # 挥击前快照需已有效抬升、未锁存掉落且当前双侧有效接触。
-        self._store(values["hold_fraction"], self.hold_steps.float() / (self.swing_start - self.lift_end))
+        self._store(values["hold_fraction"], self.hold_fraction())
         self._store(self.grasp_valid, (values["lift_success"] > 0) & bilateral & ~self.dropped)
         self._store(values["grasp_before_swing"], self.grasp_valid)
         self._store(values["wrap"], values["wrap"] + 0.25 * self.grasp_valid * values["seat_before_swing"] / 1.5)
@@ -589,8 +591,7 @@ class GraspResidualAction(ActionTerm):
         self._store(values["strike_force_1"], per_strike_mean_force[:, 0])
         self._store(values["strike_force_2"], per_strike_mean_force[:, 1])
         self._store(values["strike_force_3"], per_strike_mean_force[:, 2])
-        f = torch.log1p(per_strike_mean_force / self._env.cfg.force_ref_n)
-        force_reward = 0.5 * f.mean(dim=-1) + 0.5 * f.min(dim=-1).values
+        force_reward = force_mean_min(per_strike_mean_force, 0.5, self._env.cfg.force_ref_n)
         self._store(values["force"], torch.where(~self.returning, force_reward, values["force"]))
 
         # 仅第三次挥击及最终卸载的接触参与原提前卸载逻辑。

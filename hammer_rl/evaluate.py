@@ -15,7 +15,7 @@ from mjlab.managers.recorder_manager import RecorderTerm, RecorderTermCfg
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.utils.lab_api.math import quat_apply
 
-from .collection import HammerCollectionEnv
+from .collection import HammerCollectionEnv, candidate_batches
 from .env_cfg import make_env_cfg
 from .mdp.observations import sync_data
 from .inference import load_models, select_candidates
@@ -25,16 +25,6 @@ class _TerminalMetrics(RecorderTerm):
     def record_pre_reset(self, env_ids):
         values = self._env.action_manager.get_term("grasp").values
         self.values = {name: value.clone() for name, value in values.items()}
-
-
-def candidate_batches(env, pairs, episodes):
-    """显式绑定 A 场景/候选，逐批评估。"""
-    for first in range(0, episodes, env.num_envs):
-        selected = torch.tensor([pairs[i % len(pairs)]
-            for i in range(first, first + env.num_envs)], device=env.device)
-        env.hammer.selection = selected.unbind(-1)
-        env.reset()
-        yield first, selected
 
 
 @torch.no_grad()

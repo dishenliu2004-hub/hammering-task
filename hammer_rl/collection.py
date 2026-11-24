@@ -10,6 +10,16 @@ import warp as wp
 from mjlab.envs import ManagerBasedRlEnv
 
 
+def candidate_batches(env, pairs, episodes):
+    """逐批绑定指定的场景和候选，末批循环补齐。"""
+    for first in range(0, episodes, env.num_envs):
+        selected = torch.tensor([pairs[i % len(pairs)]
+            for i in range(first, first + env.num_envs)], device=env.device)
+        env.hammer.selection = selected.unbind(-1)
+        env.reset()
+        yield first, selected
+
+
 @wp.kernel
 def _advance(step: wp.array[int], running: wp.array[int], end: int):
     step[0] += 1
@@ -247,7 +257,7 @@ class HammerTrainingEnv(_HammerGraphEnv):
         self.active[ids] = False
         self.episode_length_buf[ids] = 1
         grasp = self._grasp
-        grasp.values["hold_fraction"][ids] = grasp.hold_steps[ids].float() / (grasp.swing_start - grasp.lift_end)
+        grasp.values["hold_fraction"][ids] = grasp.hold_fraction(ids)
         metrics = {name: cfg.func(self, **cfg.params)[ids] for name, cfg in self.cfg.metrics.items()
                    if not cfg.per_substep}
         metrics["collect"] = self.force_sum[ids] / self.ticks[ids]

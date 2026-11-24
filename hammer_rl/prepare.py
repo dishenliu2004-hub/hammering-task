@@ -10,9 +10,8 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
-import torch
 from mjlab.managers.event_manager import RecomputeLevel
-from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
+from mjlab.sim import Simulation, SimulationCfg
 from scipy.spatial.transform import Rotation
 
 from generation.enclosure import build_enclosure_geometry
@@ -21,9 +20,9 @@ from generation.hammer_generate import (create_simulation, sync_data, sample_leg
     support_contacts, SCENE, STABILITY_DURATION, STABILITY_INTERVAL, STABILITY_POSITION,
     STABILITY_ROTATION_DEG)
 from generation.hammer_inertia import add_head_mass
+from .env_cfg import hammer_mujoco_cfg, hammer_scene_spec
+from .mdp.resets import STATE_FIELDS, restore_scene_model, restore_scene_state
 
-STATE_FIELDS = ("qpos", "qvel", "act", "ctrl", "mocap_pos", "mocap_quat", "eq_active",
-                "qfrc_applied", "xfrc_applied", "qacc_warmstart")
 MODEL_FIELDS = ("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
                 "dof_invweight0", "body_invweight0", "tendon_length0",
                 "tendon_invweight0", "actuator_acc0")
@@ -36,45 +35,19 @@ def restore_bank(sim, bank, indices):
     model = sim.mj_model
     h, body = model.geom("hammer_handle").id, model.body("hammer_Object").id
 
-    def tensor(values, target):
-        return torch.as_tensor(values, dtype=target.dtype, device=sim.device)
-
-    sizes = tensor(bank["handle_size"][indices], sim.model.geom_size)
-    sim.model.geom_size[:, h, :2] = sizes
-    sim.model.geom_rbound[:, h] = sizes.sum(dim=1)
-    sim.model.geom_aabb[:, h, 1, :2] = sizes[:, :1]
-    sim.model.geom_aabb[:, h, 1, 2] = sizes.sum(dim=1)
-    sim.model.body_pos[:, body] = tensor(bank["reference_pos"][indices], sim.model.body_pos)
-    sim.model.body_quat[:, body] = tensor(bank["reference_quat"][indices], sim.model.body_quat)
+    restore_scene_model(sim.model, slice(None), bank, indices, h, body)
     sim.recompute_constants(RecomputeLevel.set_const_0)
     # set_const 可能改写 data，必须在其后恢复包括 warmstart 在内的全部状态。
     sim.reset()
-    for name in STATE_FIELDS:
-        target = getattr(sim.data, name)
-        target[:] = tensor(bank[name][indices], target)
-    sim.data.time[:] = 0
+    restore_scene_state(sim.data, slice(None), bank, indices)
     sim.forward()
 
 
 def bank_simulation(bank, indices, device="cuda:0"):
-    spec = mujoco.MjSpec.from_file(str(SCENE))
-    add_head_mass(spec, float(bank["hammer_head_extra_mass"]))
-    spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
-    spec.option.noslip_iterations = 0
-    spec.geom("hammer_head").condim = 6
+    spec = hammer_scene_spec(SCENE, float(bank["hammer_head_extra_mass"]))
     model = spec.compile()
-    opt = model.opt
     # 与 generation.hammer_generate.create_simulation 使用相同的物理设置。
-    cfg = SimulationCfg(nconmax=128, njmax=1024, mujoco=MujocoCfg(
-        timestep=opt.timestep,
-        integrator=mujoco.mjtIntegrator(opt.integrator).name.removeprefix("mjINT_").lower(),
-        cone="elliptic",
-        jacobian=mujoco.mjtJacobian(opt.jacobian).name.removeprefix("mjJAC_").lower(),
-        solver=mujoco.mjtSolver(opt.solver).name.removeprefix("mjSOL_").lower(),
-        impratio=opt.impratio, iterations=opt.iterations, tolerance=opt.tolerance,
-        ls_iterations=opt.ls_iterations, ls_tolerance=opt.ls_tolerance,
-        ccd_iterations=opt.ccd_iterations, gravity=tuple(opt.gravity),
-        disableflags=("multiccd",)))
+    cfg = SimulationCfg(nconmax=128, njmax=1024, mujoco=hammer_mujoco_cfg(model.opt))
     sim = Simulation(len(indices), cfg, model=model, device=device)
     sim.expand_model_fields(MODEL_FIELDS)
     restore_bank(sim, bank, indices)

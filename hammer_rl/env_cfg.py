@@ -48,13 +48,29 @@ class HammerEnvCfg(ManagerBasedRlEnvCfg):
     force_ref_n: float = 10.0  # 三次力度奖励的参考力，N
 
 
-def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
-    # 挂接原场景，沿用既有物理设置和控制约束。
-    source = mujoco.MjSpec.from_file(str(SCENE))
+def hammer_scene_spec(scene_path, hammer_head_extra_mass):
+    source = mujoco.MjSpec.from_file(str(scene_path))
     add_head_mass(source, hammer_head_extra_mass)
     source.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     source.option.noslip_iterations = 0
     source.geom("hammer_head").condim = 6
+    return source
+
+
+def hammer_mujoco_cfg(opt):
+    return MujocoCfg(
+        timestep=opt.timestep,
+        integrator=mujoco.mjtIntegrator(opt.integrator).name.removeprefix("mjINT_").lower(),
+        cone="elliptic",
+        jacobian=mujoco.mjtJacobian(opt.jacobian).name.removeprefix("mjJAC_").lower(),
+        solver=mujoco.mjtSolver(opt.solver).name.removeprefix("mjSOL_").lower(),
+        impratio=opt.impratio, iterations=opt.iterations, tolerance=opt.tolerance,
+        ls_iterations=opt.ls_iterations, ls_tolerance=opt.ls_tolerance,
+        ccd_iterations=opt.ccd_iterations, gravity=tuple(opt.gravity), disableflags=("multiccd",))
+
+
+def _attach_scene(spec: mujoco.MjSpec, hammer_head_extra_mass=0.0) -> None:
+    source = hammer_scene_spec(SCENE, hammer_head_extra_mass)
     source.compile()
     spec.modelname = source.modelname
     spec.option = source.option
@@ -112,15 +128,8 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
         randomize_physics=randomize, visual_noise=stage in ("distill", "student"),
         scene=SceneCfg(num_envs=num_envs, sensors=sensors,
             spec_fn=partial(_attach_scene, hammer_head_extra_mass=hammer_head_extra_mass)),
-        sim=SimulationCfg(nconmax=64, njmax=512, contact_sensor_maxmatch=4, mujoco=MujocoCfg(
-            timestep=opt.timestep,
-            integrator=mujoco.mjtIntegrator(opt.integrator).name.removeprefix("mjINT_").lower(),
-            cone="elliptic",
-            jacobian=mujoco.mjtJacobian(opt.jacobian).name.removeprefix("mjJAC_").lower(),
-            solver=mujoco.mjtSolver(opt.solver).name.removeprefix("mjSOL_").lower(),
-            impratio=opt.impratio, iterations=opt.iterations, tolerance=opt.tolerance,
-            ls_iterations=opt.ls_iterations, ls_tolerance=opt.ls_tolerance,
-            ccd_iterations=opt.ccd_iterations, gravity=tuple(opt.gravity), disableflags=("multiccd",))),
+        sim=SimulationCfg(nconmax=64, njmax=512, contact_sensor_maxmatch=4,
+                          mujoco=hammer_mujoco_cfg(opt)),
         decimation=decimation, episode_length_s=decimation * opt.timestep,
         # 单次尝试结束即 terminal，奖励不乘 dt。
         auto_reset=True, is_finite_horizon=True, scale_rewards_by_dt=False,

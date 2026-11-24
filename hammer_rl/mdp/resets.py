@@ -70,12 +70,16 @@ def randomize_physics(env, env_ids):
         task.nominal_stiffness[task.spring_joint_ids] * spring_scale)
 
 
+def pregrasp_position(position, quaternion):
+    approach = torch.zeros_like(position)
+    approach[:, 2] = 1
+    return position - 0.10 * quat_apply(quaternion, approach)
+
+
 def public_observation(seed_pos, seed_quat, widths, open_ctrl, *, finger_pos, finger_vel,
                        camera_pos, camera_quat, intrinsics, target_pos, target_quat):
     """仿真缓存和在线公开输入共用的 50 维字段；仅计算张量。"""
-    approach = torch.zeros_like(seed_pos)
-    approach[:, 2] = 0.10
-    pregrasp = seed_pos - quat_apply(seed_quat, approach)
+    pregrasp = pregrasp_position(seed_pos, seed_quat)
     return torch.cat((seed_pos, seed_quat, widths[:, None], open_ctrl[:, None],
         pregrasp, seed_quat, finger_pos, finger_vel, camera_pos, camera_quat, intrinsics,
         target_pos, target_quat), dim=-1)
@@ -149,6 +153,27 @@ def bind_candidates(env, env_ids, candidate):
     return obs
 
 
+def restore_scene_model(model, env_ids, bank, scene_ids, handle_id, hammer_id):
+    sizes = torch.as_tensor(bank["handle_size"][scene_ids], dtype=model.geom_size.dtype,
+                            device=model.geom_size.device)
+    bound = sizes[:, 0] + sizes[:, 1]
+    model.geom_size[env_ids, handle_id, :2] = sizes
+    model.geom_rbound[env_ids, handle_id] = bound
+    model.geom_aabb[env_ids, handle_id, 1, :2] = sizes[:, :1]
+    model.geom_aabb[env_ids, handle_id, 1, 2] = bound
+    for field, key in (("body_pos", "reference_pos"), ("body_quat", "reference_quat")):
+        target = getattr(model, field)
+        target[env_ids, hammer_id] = torch.as_tensor(bank[key][scene_ids], dtype=target.dtype,
+                                                    device=target.device)
+
+
+def restore_scene_state(data, env_ids, bank, scene_ids):
+    for name in STATE_FIELDS:
+        target = getattr(data, name)
+        target[env_ids] = torch.as_tensor(bank[name][scene_ids], dtype=target.dtype, device=target.device)
+    data.time[env_ids] = 0
+
+
 @requires_model_fields("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
                        recompute=RecomputeLevel.set_const_0)
 def reset_scene(env, env_ids):
@@ -163,16 +188,7 @@ def reset_scene(env, env_ids):
         scene, candidate = task.selection
         scene, candidate = scene[env_ids], candidate[env_ids]
     task.scene_id[env_ids] = scene
-    sizes = bank["handle_size"][scene]
-    radius, half_length = sizes[:, 0], sizes[:, 1]
-    h = task.handle_geom_id
-    model.geom_size[env_ids, h, :2] = sizes
-    model.geom_rbound[env_ids, h] = radius + half_length
-    model.geom_aabb[env_ids, h, 1, 0] = radius
-    model.geom_aabb[env_ids, h, 1, 1] = radius
-    model.geom_aabb[env_ids, h, 1, 2] = radius + half_length
-    model.body_pos[env_ids, task.hammer_id] = bank["reference_pos"][scene]
-    model.body_quat[env_ids, task.hammer_id] = bank["reference_quat"][scene]
+    restore_scene_model(model, env_ids, bank, scene, task.handle_geom_id, task.hammer_id)
     depth = bank["depth"][scene]
     task.depth[env_ids] = task.noise(depth) if env.cfg.visual_noise else depth
     restore_start(env, env_ids, candidate)
@@ -180,9 +196,6 @@ def reset_scene(env, env_ids):
 
 def restore_start(env, env_ids, candidate):
     """从已选场景恢复物理初态，沿用该次 reset 的候选和随机化参数。"""
-    task, data = env.hammer, env.sim.data
-    scene = task.scene_id[env_ids]
-    for name in STATE_FIELDS:
-        getattr(data, name)[env_ids] = task.bank[name][scene]
-    data.time[env_ids] = 0
+    task = env.hammer
+    restore_scene_state(env.sim.data, env_ids, task.bank, task.scene_id[env_ids])
     bind_candidates(env, env_ids, candidate)

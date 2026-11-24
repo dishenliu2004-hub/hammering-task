@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from mjlab.rl import RslRlVecEnvWrapper
 
-from .collection import HammerCollectionEnv
+from .collection import HammerCollectionEnv, candidate_batches
 from .env_cfg import make_env_cfg
 from .inference import load_models
 
@@ -45,12 +45,8 @@ def main():
         pairs *= args.repeats
         episodes = args.episodes or len(pairs)
         observations, rewards, selections = [], [], []
-        for first in range(0, episodes, args.num_envs):
-            selected = torch.tensor([pairs[i % len(pairs)]
-                for i in range(first, first + args.num_envs)], device=env.device)
-            env.hammer.selection = selected.unbind(-1)
-            env.reset()
-            valid = min(args.num_envs, episodes - first)
+        for first, selected in candidate_batches(env, pairs, episodes):
+            valid = min(env.num_envs, episodes - first)
             obs = wrapper.get_observations()
             # 初始 buffer 会在 step 的自动 reset 中原地重写，必须执行前保存。
             observations.append(obs[:valid].select(*config["rl"]["obs_groups"]["critic"]).clone().cpu())

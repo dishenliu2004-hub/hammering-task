@@ -7,6 +7,11 @@ def score(env, name):
     return env.action_manager.get_term("grasp").values[name]
 
 
+def force_mean_min(forces, alpha, force_ref_n):
+    scaled = torch.log1p(forces / force_ref_n)
+    return alpha * scaled.mean(dim=-1) + (1 - alpha) * scaled.amin(dim=-1)
+
+
 def compute_term(values, term, mapping_prior, *, swing_observed=True):
     formula, params = term["formula"], term["params"]
     if formula == "identity":
@@ -21,8 +26,7 @@ def compute_term(values, term, mapping_prior, *, swing_observed=True):
     if formula == "force_mean_min":
         alpha, force_ref_n = params
         forces = torch.stack([values[f"strike_force_{i}"] for i in (1, 2, 3)], dim=-1)
-        scaled = torch.log1p(forces / force_ref_n)
-        return alpha * scaled.mean(-1) + (1 - alpha) * scaled.amin(-1)
+        return force_mean_min(forces, alpha, force_ref_n)
     if formula == "hold_drift":
         pos_scale, rot_scale = params
         return swing_observed * values["hold_fraction"] * torch.exp(

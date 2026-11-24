@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import torch
+from mjlab.utils.lab_api.math import axis_angle_from_quat, quat_apply_inverse, quat_conjugate, quat_mul
 from tensordict import TensorDict
 from rsl_rl.utils import resolve_callable
 
@@ -43,16 +44,26 @@ def load_models(checkpoint, device="cuda:0", *, with_critic=True):
 
 
 @torch.no_grad()
-def select_and_refine(actor, critic, observations, offsets, action_cfg):
-    """offsets 分组变长候选；同分沿用 torch.argmax 的首个结果。"""
+def select_and_refine(actor, critic, observations, offsets, action_cfg, *, sdk_scores):
+    """逐场景选择候选，返回原 actor 动作和 SDK 基准下的残差（米、弧度）。"""
+    def best_indices(candidate_scores):
+        return torch.stack([candidate_scores[start:end].argmax() + start
+                            for start, end in zip(offsets[:-1], offsets[1:])])
+
     scores = critic(observations).squeeze(-1)
-    index = torch.stack([scores[start:end].argmax() + start
-                         for start, end in zip(offsets[:-1], offsets[1:])])
+    index = best_indices(scores)
+    sdk_index = best_indices(sdk_scores)
     public = observations["public_seed"][index]
     action = actor(observations[index])
     pos, quat, pregrasp = refine_pose(public[:, :3], public[:, 3:7], action, action_cfg)
+    sdk_seed = observations["public_seed"][sdk_index]
+    sdk_pos, sdk_quat = sdk_seed[:, :3], sdk_seed[:, 3:7]
+    relative_pos = quat_apply_inverse(sdk_quat, pos - sdk_pos)
+    relative_quat = quat_mul(quat_conjugate(sdk_quat), quat)
+    residual = torch.cat((relative_pos, axis_angle_from_quat(relative_quat)), dim=-1)
     return dict(index=index, candidate_index=index - offsets[:-1], scores=scores,
-        score=scores[index], action=action, mount_pos=pos, mount_quat=quat,
+        sdk_candidate_index=sdk_index - offsets[:-1], score=scores[index],
+        action=action, residual=residual, mount_pos=pos, mount_quat=quat,
         pregrasp_pos=pregrasp, width=public[:, 7], gripper_open_ctrl=public[:, 8])
 
 
@@ -68,7 +79,8 @@ def select_candidates(env, actor, critic, env_ids):
     candidate = (starts.repeat_interleave(counts) + torch.arange(offsets[-1], device=env.device)
                  - offsets[:-1].repeat_interleave(counts))
     obs = candidate_observations(env, repeated, candidate)
-    result = select_and_refine(actor, critic, obs, offsets, env.cfg.actions["grasp"])
+    result = select_and_refine(actor, critic, obs, offsets, env.cfg.actions["grasp"],
+                               sdk_scores=task.bank["scores"][candidate])
     result["candidate_id"] = candidate[result["index"]]
     bind_candidates(env, env_ids, result["candidate_id"])
     env.sim.forward()
@@ -93,5 +105,7 @@ def select_grasp(actor, critic, depth, scene, grasps):
     public = public_observation(seed_pos, seed_quat, tensor(grasps["widths"]), open_ctrl, **fields)
     observations = TensorDict({"public_seed": public,
         "depth": tensor(depth).unsqueeze(0).expand(count, -1, -1, -1)}, batch_size=[count])
+    sdk_scores = torch.as_tensor(grasps["scores"], device=device)
     return select_and_refine(actor, critic, observations,
-        torch.tensor([0, count], device=device), GraspResidualActionCfg(entity_name="gripper_mount"))
+        torch.tensor([0, count], device=device), GraspResidualActionCfg(entity_name="gripper_mount"),
+        sdk_scores=sdk_scores)
