@@ -224,7 +224,11 @@ class HammerTrainingEnv(_HammerGraphEnv):
                 else:
                     run_phase(i, lambda: sample(self.ticks))
             self.force_sum.add_(torch.where(self.active, grasp.values["mean_force"], 0))
-            self.finished_ids_mask.copy_(self.active & (grasp.dropped | (self.ticks == self.cfg.decimation)))
+            self.finished_ids_mask.copy_(self.active & (
+                grasp.dropped
+                | ((self.ticks == grasp.lift_end) & (grasp.values["lift_success"] == 0))
+                | (self.ticks == self.cfg.decimation)
+            ))
             running.copy_(~self.finished_ids_mask.any())
 
         def record():

@@ -17,7 +17,7 @@ from .resets import initialize_task, pregrasp_position
 from .rewards import force_mean_min
 
 DT = 0.02
-PRE_SWING_MOVE_DURATIONS = (1.0, 0.6, 0.50, 0.40, 0.50, 1.5, 1.5, 0.60)
+PRE_SWING_MOVE_DURATIONS = (1.0, 0.6, 0.8, 0.8, 1.0, 2.5, 2.5, 1.0)
 PRE_SWING_HOLD_DURATION = 0.5
 
 
@@ -233,7 +233,7 @@ class GraspResidualAction(ActionTerm):
         self.pregrasp[env_ids] = pregrasp
         self.start_pos[env_ids] = data.mocap_pos[env_ids, self.mocap]
         self.start_quat[env_ids] = data.mocap_quat[env_ids, self.mocap]
-        self.lifted_pos[env_ids] = pos + 0.15 * self.unit[env_ids, 2]
+        self.lifted_pos[env_ids] = pos + 0.25 * self.unit[env_ids, 2]
 
     def _store(self, dest, value):
         """训练图内只写当前阶段的世界；同步回放时整批写入。"""
@@ -279,7 +279,7 @@ class GraspResidualAction(ActionTerm):
         carry_quat = data.mocap_quat[:, self.mocap].clone()
         head_start = data.mocap_pos[:, self.mocap] + quat_apply(carry_quat, self.head_offset)
         high_start, high_target = head_start.clone(), head_impact.clone()
-        high_start[:, 2] = high_target[:, 2] = head_start[:, 2] + 0.20
+        high_start[:, 2] = high_target[:, 2] = 0.75
         self._store(self.strike_pos, self._swing_pose(0.0)[0])
         head_strike = self.strike_pos + quat_apply(self.raised_quat, self.head_offset)
         segments = (
@@ -464,7 +464,7 @@ class GraspResidualAction(ActionTerm):
         self._store(self.lost_contact_steps, torch.where(evaluating,
             torch.where(lost, self.lost_contact_steps + 1, 0), self.lost_contact_steps))
         self._store(self.dropped, self.dropped | (evaluating & (self.lost_contact_steps >= self.substeps)))
-        self._store(values["drop"], self.dropped)
+        self._store(values["drop"], (values["drop"] > 0) | self.dropped)
 
     def _lift_snapshot(self, k):
         data, values, bilateral = self._env.sim.data, self.values, self.bilateral
@@ -480,6 +480,8 @@ class GraspResidualAction(ActionTerm):
         # 抬升失败时几何分为零；有双侧接触时仍可获得部分抬升进展分。
         lift = (values["lift_height"] >= self._env.cfg.lift_threshold) & bilateral
         self._store(values["lift_success"], lift)
+        if self._env.cfg.reward_recipe is None:
+            self._store(values["drop"], ~lift)
         self._store(values["lift_progress"], (values["lift_height"] / self._env.cfg.lift_threshold).clamp(0, 1)
                                       * bilateral)
 

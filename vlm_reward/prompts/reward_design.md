@@ -9,4 +9,4 @@
 - `prior_region`、`prior_axis` 和 `orientation` 作为几何辅助项。`distance` 只反映夹持中心沿柄轴到锤头的距离，适合弱化使用。若靠近自由端与包覆或持有目标冲突，可省略该项。
 - 每项给出 `id`、`weight`、`formula`、`params` 和 `gate`。从 `available_terms` 选择 `id`，每个 `id` 最多一次。从 `available_formulas` 选择已有公式，按说明填写有序参数数组。`gate` 只能取 `none`、`lift_success` 或 `grasp_before_swing`，`prior_gaussian` 和 `prior_axis_power` 必须使用 `lift_success`。只输出结构化配方，不生成 Python 代码或新指标。
 
-输出 `terms`、简短的中文 `rationale` 和 `preview_candidate`。根据照片和 latent 中的关键点对应，为对照图选择一个候选，输出它在 `pose_candidates` 中从 0 开始的下标。理由说明奖励的任务优先级，以及照片和 latent 中的抓持关系如何影响算子选择。
+输出 `terms`、不超过 300 字符的中文 `rationale` 和 `preview_candidate`。根据照片和 latent 中的关键点对应，为对照图选择一个候选，输出它在 `pose_candidates` 中从 0 开始的下标。理由只概括奖励的任务优先级及抓持关系对算子选择的主要影响，不逐项展开或复述输入。

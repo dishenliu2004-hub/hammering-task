@@ -9,6 +9,6 @@
 - 用 `hold_fraction`、`stability`、`translation_drift`、`rotation_drift` 和 `drop` 判断持有与滑移。挥击前漂移较大时，可调整 `stability` 或使用 `hold_drift`。
 - `task_success` 表示三次有效命中且卸载前仍持有。`valid_strike` 表示至少一次有效命中。结合 `hit_progress` 和各次 `strike_force_*` 判断失败发生在哪次击打。若持有稳定但敲击力不足，可调整 `force_mean_min` 的权重或参数。若击打成功后难以恢复持有，考虑调整 `recovery_hold`。
 
-输出一份完整的下一轮配方，包含 `terms`、`mapping_prior` 和简短的中文 `rationale`。理由说明当前反馈中的主要现象和调整依据。可以增删已有奖励项、调整权重、切换已有公式、调整公式参数或调整机器人适配先验。若当前反馈没有明显问题，输出一份等价配方。
+输出一份完整的下一轮配方，包含 `terms`、`mapping_prior` 和不超过 300 字符的中文 `rationale`。理由只概括当前反馈中的主要现象和关键调整依据，不逐项展开或复述输入。可以增删已有奖励项、调整权重、切换已有公式、调整公式参数或调整机器人适配先验。若当前反馈没有明显问题，输出一份等价配方。
 
 每个奖励项使用 `id`、`weight`、`formula`、`params` 和 `gate`。从 `available_terms` 选择 `id`，每个 `id` 最多一次。从 `available_formulas` 选择公式并按说明填写有序参数数组。`gate` 只能取 `none`、`lift_success` 或 `grasp_before_swing`。`prior_gaussian` 和 `prior_axis_power` 必须使用 `lift_success`，敲击力奖励使用 `grasp_before_swing`。以 `task_success` 为主要终局目标，`drop` 使用负权重，仿生先验服务于完整敲击任务。只输出一份结构化配方，不输出候选列表、新指标、新算子或 Python 代码。

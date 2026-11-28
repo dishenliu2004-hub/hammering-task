@@ -8,11 +8,11 @@ from pathlib import Path
 
 import numpy as np
 import yaml
-from PIL import Image, ImageOps
+from PIL import Image
 
 from .api_client import design
 from .reward_schema import AVAILABLE_FORMULAS, AVAILABLE_TERMS, reflection_schema
-from .rgbd_context import image_input
+from .rgbd_context import hand_image_inputs, image_input
 
 ROOT = Path(__file__).resolve().parent
 FEEDBACK_METRICS = (
@@ -47,8 +47,7 @@ def reflect(config, mapping, recipe, feedback_dir, recipe_id):
     frames = feedback_dir / "frames"
     index = json.loads((frames / "index.json").read_text())
     generation = recipe["generation"]
-    with Image.open(generation["hand_image"]) as photo:
-        images = [image_input(ImageOps.exif_transpose(photo).convert("RGB"))]
+    images = hand_image_inputs(generation["hand_image"])
     for frame in index:
         with Image.open(frames / frame["file"]) as image:
             images.append(image_input(image))
@@ -71,8 +70,8 @@ def main():
     parser.add_argument("--data-file", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/vlm.yaml")
-    parser.add_argument("--evolution-rounds", type=int, required=True)
-    parser.add_argument("--max-iterations", type=int, required=True)
+    parser.add_argument("--total-iterations", type=int, required=True, help="总训练 PPO update 数")
+    parser.add_argument("--max-iterations", type=int, required=True, help="每轮内循环的 PPO update 数")
     parser.add_argument("--num-envs", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", required=True)
@@ -87,9 +86,11 @@ def main():
     data_args = ["--data-file", str(args.data_file)]
     recipe_args = [*data_args, "--split", "train", "--reward-recipe", str(recipe_path),
                    "--hammer-head-extra-mass", str(args.hammer_head_extra_mass)]
-    for version in range(1, args.evolution_rounds + 2):
+    rounds = (args.total_iterations + args.max_iterations - 1) // args.max_iterations
+    for version in range(1, rounds + 1):
+        iterations = min(args.max_iterations, args.total_iterations - (version - 1) * args.max_iterations)
         checkpoint = train(["--stage", "teacher", *recipe_args, *runtime,
-                            "--max-iterations", str(args.max_iterations), "--num-envs", str(args.num_envs),
+                            "--max-iterations", str(iterations), "--num-envs", str(args.num_envs),
                             "--log-dir", str(output / f"teacher_v{version}")])
         feedback_dir = output / f"feedback_v{version}"
         subprocess.run([sys.executable, "-m", "hammer_rl.evaluate", *data_args, *runtime,
@@ -97,7 +98,7 @@ def main():
                         "--checkpoint", str(checkpoint), "--episodes", "0", "--headless",
                         "--output", str(feedback_dir / "metrics.npz"),
                         "--feedback-dir", str(feedback_dir / "frames")], check=True)
-        if version <= args.evolution_rounds:
+        if version < rounds:
             recipe = json.loads(recipe_path.read_text())
             recipe_path = output / f"reward_v{version + 1}.json"
             next_recipe = reflect(config, mapping, recipe, feedback_dir, recipe_path.stem)

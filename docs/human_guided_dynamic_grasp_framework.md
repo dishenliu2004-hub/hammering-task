@@ -64,7 +64,7 @@ Teacher 奖励进化后，可单独执行 `hammer_rl.train --stage distill`，�
 
 ## 四、运行与产物
 
-从项目根目录运行。使用 `hammer` 环境，预先设置可接收图像和 JSON Schema 输出的 Responses API 服务地址 `OPENAI_BASE_URL` 与密钥 `OPENAI_API_KEY`。默认模型由 YAML 配置指定。将 `--hand-image` 替换为实际的人手抓锤照片。 [VLM 配置](../vlm_reward/configs/vlm.yaml)
+从项目根目录运行。使用 `hammer` 环境，预先设置可接收图像和 JSON Schema 输出的 Responses API 服务地址 `OPENAI_BASE_URL` 与密钥 `OPENAI_API_KEY`。默认模型由 YAML 配置指定。`--hand-image` 支持单张人手抓锤照片或仅包含照片的目录；目录中的照片按文件名排序，初始奖励生成和每轮反思均读取全部照片。 [VLM 配置](../vlm_reward/configs/vlm.yaml)
 
 ```bash
 conda activate hammer
@@ -73,15 +73,15 @@ export MPLBACKEND=Agg
 
 output_dir="weight/hammer_rl/runs/teacher/vlm_$(date +%Y%m%d_%H%M%S)"
 python -m vlm_reward.reward_designer \
-  --hand-image /path/to/hand-hammer.png \
+  --hand-image data/grasp_picture \
   --data-file weight/hammer_rl/reset_bank_v1_256.npz \
   --description "保持三次有效命中及卸载前持有，提高各次敲击平均力" \
   --output-dir "$output_dir" \
-  --evolution-rounds 1 \
+  --total-iterations 10000 \
   --max-iterations 5000
 ```
 
-生成预览后输入 `yes` 开始训练。`--evolution-rounds` 表示 V1 之后的修正次数，默认 1，总训练阶段数为 `1 + evolution_rounds`。`--max-iterations` 是每个阶段追加的 PPO 更新数。设 `--evolution-rounds 0` 时执行 V1 训练和评估。
+生成预览后输入 `yes` 开始训练。`--total-iterations` 表示总训练 PPO 更新数，默认 10000；`--max-iterations` 表示每轮内循环的 PPO 更新数，默认 5000。外循环次数为两者相除向上取整，末轮只追加剩余更新。例如总计 12000、每轮 5000 时，依次训练 5000、5000、2000 次。每阶段训练后执行评估，只有后面还有训练阶段时才修正奖励，因此奖励修正次数为外循环次数减一。总数不超过内循环轮次时，仅执行 V1 训练和评估。
 
 | 产物 | 用途 |
 | --- | --- |

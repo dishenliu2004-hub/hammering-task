@@ -44,7 +44,7 @@ def _recipe_schema(**fields):
                 "gate": {"type": "string", "enum": ["none", "lift_success", "grasp_before_swing"]},
             },
         }},
-        "rationale": {"type": "string"},
+        "rationale": {"type": "string", "maxLength": 300},
         **fields,
     }
     return {"type": "object", "additionalProperties": False,

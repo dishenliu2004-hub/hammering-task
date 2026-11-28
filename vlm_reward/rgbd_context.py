@@ -2,10 +2,11 @@
 
 import base64
 from io import BytesIO
+from pathlib import Path
 
 from matplotlib import colormaps
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def image_input(image):
@@ -13,6 +14,16 @@ def image_input(image):
     image.save(buffer, format="PNG")
     return dict(type="input_image", detail="high",
                 image_url="data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode())
+
+
+def hand_image_inputs(path):
+    path = Path(path)
+    paths = sorted(path.iterdir()) if path.is_dir() else [path]
+    images = []
+    for image_path in paths:
+        with Image.open(image_path) as photo:
+            images.append(image_input(ImageOps.exif_transpose(photo).convert("RGB")))
+    return images
 
 
 def rgbd_inputs(scene, directory, depth_range_m):

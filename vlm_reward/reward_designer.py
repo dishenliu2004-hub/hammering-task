@@ -8,13 +8,12 @@ from pathlib import Path
 
 import numpy as np
 import yaml
-from PIL import Image, ImageOps
 
 from visualization.keypoint_preview import save_preview
 
 from .api_client import design
 from .reward_schema import AVAILABLE_FORMULAS, AVAILABLE_TERMS, design_schema
-from .rgbd_context import image_input
+from .rgbd_context import hand_image_inputs
 
 ROOT = Path(__file__).resolve().parent
 
@@ -29,15 +28,15 @@ def assemble_recipe(design_result, mapping, *, recipe_id, mapping_ref, profile_i
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hand-image", type=Path, required=True)
+    parser.add_argument("--hand-image", type=Path, required=True, help="人手抓锤照片文件或仅包含照片的目录")
     parser.add_argument("--data-file", type=Path,
                         default=ROOT.parent / "weight/hammer_rl/reset_bank_v1_256.npz")
     parser.add_argument("--description", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/vlm.yaml")
     parser.add_argument("--num-envs", type=int, default=512)
-    parser.add_argument("--max-iterations", type=int, default=5000, help="每个训练阶段的 PPO update 数")
-    parser.add_argument("--evolution-rounds", type=int, default=1, help="初始奖励之后的 VLM 奖励修正次数")
+    parser.add_argument("--total-iterations", type=int, default=10000, help="总训练 PPO update 数")
+    parser.add_argument("--max-iterations", type=int, default=5000, help="每轮内循环的 PPO update 数")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
@@ -50,8 +49,7 @@ def main():
     subprocess.run([sys.executable, "-m", "mapping.export_mapping", "--data-file",
                     str(data_file), "--output", str(mapping_path)], check=True)
     mapping = json.loads(mapping_path.read_text())
-    with Image.open(args.hand_image) as photo:
-        images = [image_input(ImageOps.exif_transpose(photo).convert("RGB"))]
+    images = hand_image_inputs(args.hand_image)
     context = {"task_id": "hammer", "description": args.description, "available_terms": AVAILABLE_TERMS,
                "available_formulas": AVAILABLE_FORMULAS, "mapping_latent": mapping}
     result, response_id = design(config, (ROOT / config["prompt"]).read_text(), context, images,
@@ -72,7 +70,7 @@ def main():
         subprocess.run([sys.executable, "-m", "vlm_reward.reward_evolution",
                         "--initial-recipe", str(recipe_path), "--mapping", str(mapping_path),
                         "--data-file", str(data_file), "--output-dir", str(output), "--config", str(args.config),
-                        "--evolution-rounds", str(args.evolution_rounds),
+                        "--total-iterations", str(args.total_iterations),
                         "--hammer-head-extra-mass", str(extra_mass),
                         "--num-envs", str(args.num_envs), "--max-iterations", str(args.max_iterations),
                         "--seed", str(args.seed), "--device", args.device], check=True)

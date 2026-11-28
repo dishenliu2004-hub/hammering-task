@@ -1,4 +1,4 @@
 model: qwen4-max
-max_output_tokens: 4096
+max_output_tokens: 262144
 prompt: prompts/reward_design.md
 reflection_prompt: prompts/reward_reflection.md
