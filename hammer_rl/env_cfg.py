@@ -19,8 +19,8 @@ from mjlab.sensor import ContactSensorCfg, ContactMatch
 from mjlab.sim import MujocoCfg, SimulationCfg
 
 from generation.hammer_inertia import add_head_mass
-from .mdp.actions import GraspResidualActionCfg, attempt_substeps, collect_attempt
-from .mdp import observations, rewards, resets, terminations, curriculum
+from generation.actions import GraspResidualActionCfg, attempt_substeps, collect_attempt
+from generation import observations, rewards, resets, terminations, curriculum
 
 SCENE = Path(__file__).resolve().parents[1] / "assets/scenes/scene.xml"
 
@@ -39,7 +39,7 @@ class HammerEnvCfg(ManagerBasedRlEnvCfg):
     friction_range: tuple = (0.8, 1.2)
     spring_stiffness_range: tuple = (0.8, 1.2)
 
-    lift_threshold: float = 0.15  # 有效抬升高度，m
+    lift_threshold: float = 0.12  # 有效抬升高度，m
     distance_ref: float = 0.315  # 距离归一化尺度，m
     stability_position_scale: float = 0.015  # 相对平移尺度，m
     stability_rotation_scale: float = math.pi / 36  # 相对旋转尺度，5°
@@ -88,7 +88,7 @@ def make_env_cfg(hammer_head_extra_mass=0.0, *, data_file="weight/hammer_rl/rese
     action = GraspResidualActionCfg(entity_name="gripper_mount")
     # 一个环境 step 完成一次抓取和敲击尝试。
     decimation = attempt_substeps(
-        opt.timestep, action.unload_time, action.num_strikes, action.recover_time)
+        opt.timestep, action.unload_time, action.recover_time)
 
     sensors = (
         # 指面与锤柄接触：抓持判定。

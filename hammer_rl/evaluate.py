@@ -17,7 +17,7 @@ from mjlab.utils.lab_api.math import quat_apply
 
 from .collection import HammerCollectionEnv, candidate_batches
 from .env_cfg import make_env_cfg
-from .mdp.observations import sync_data
+from generation.observations import sync_data
 from .inference import load_models, select_candidates
 
 

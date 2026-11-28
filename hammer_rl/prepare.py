@@ -21,7 +21,7 @@ from generation.hammer_generate import (create_simulation, sync_data, sample_leg
     STABILITY_ROTATION_DEG)
 from generation.hammer_inertia import add_head_mass
 from .env_cfg import hammer_mujoco_cfg, hammer_scene_spec
-from .mdp.resets import STATE_FIELDS, restore_scene_model, restore_scene_state
+from generation.resets import STATE_FIELDS, restore_scene_model, restore_scene_state
 
 MODEL_FIELDS = ("body_pos", "body_quat", "geom_size", "geom_rbound", "geom_aabb",
                 "dof_invweight0", "body_invweight0", "tendon_length0",
@@ -145,6 +145,18 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0, placeme
             break
         camera.close()
         del simulation
+    sample = capture_scene_state(model, data)
+    sample["source_type"] = np.int64(placement)
+    captured, frame = capture_observation(data, camera)
+    sample.update(captured)
+    del simulation
+    grasps, _ = generate_grasps(model, data, frame, full_scene=False,
+                               workspace_bounds=WORKSPACE, convert_first=False)
+    return sample, prepare_candidates(grasps, sample, min(candidates_per_scene, 32))
+
+
+def capture_scene_state(model, data):
+    """实时入口与离线准备共用的场景参数和完整物理初态。"""
     geometry = build_enclosure_geometry(model, "cpu")
     sample = {name: getattr(data, name).copy() for name in STATE_FIELDS}
     sample.update(handle_size=model.geom("hammer_handle").size[:2].copy(),
@@ -157,16 +169,10 @@ def prepare_scene(rng, candidates_per_scene, hammer_head_extra_mass=0.0, placeme
                   target_quat=data.body("cylinder_sensing_endcap").xquat.copy(),
                   support_pos=data.body("support_L_support").xpos.copy(),
                   support_quat=data.body("support_L_support").xquat.copy())
-    sample["source_type"] = np.int64(placement)
-    captured, frame = capture_observation(data, camera)
-    sample.update(captured)
-    del simulation
-    grasps, _ = generate_grasps(model, data, frame, full_scene=False,
-                               workspace_bounds=WORKSPACE, convert_first=False)
-    return sample, _prepare_candidates(grasps, sample, min(candidates_per_scene, 32))
+    return sample
 
 
-def capture_observation(data, camera, *, rgb_path=None):
+def capture_observation(data, camera, *, rgb_path=None, close_camera=True):
     """沿用原相机的采集顺序、深度分辨率及相机参数。"""
     frame = camera.capture(data)
     if rgb_path is not None:
@@ -179,7 +185,8 @@ def capture_observation(data, camera, *, rgb_path=None):
                     camera_quat=Rotation.from_matrix(frame["camera_rot"]).as_quat()[[3, 0, 1, 2]],
                     intrinsics=np.array([camera.focal / 8, camera.focal / 8,
                                          (camera.width - 1) / 16, (camera.height - 1) / 16]))
-    camera.close()
+    if close_camera:
+        camera.close()
     return captured, frame
 
 
@@ -200,7 +207,7 @@ def _select_grasps(grasps, count):
     return np.asarray(selected, dtype=np.int64)
 
 
-def _prepare_candidates(grasps, sample, candidates_per_scene):
+def prepare_candidates(grasps, sample, candidates_per_scene):
     object_rot = Rotation.from_quat(sample["hammer_quat"][[1, 2, 3, 0]])
     candidates = []
     for i in _select_grasps(grasps, candidates_per_scene):

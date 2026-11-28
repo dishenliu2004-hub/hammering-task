@@ -1,4 +1,4 @@
-"""一次 seed 局部 6D 残差，以及 knock_path.py 固定规则的 GPU 批量表达。"""
+"""共用的抓姿局部 6D 残差、抓取与固定三次敲击执行器。"""
 
 from dataclasses import dataclass
 from functools import partial
@@ -17,7 +17,8 @@ from .resets import initialize_task, pregrasp_position
 from .rewards import force_mean_min
 
 DT = 0.02
-PRE_SWING_MOVE_DURATIONS = (1.0, 0.6, 0.8, 0.8, 1.0, 2.5, 2.5, 1.0)
+NUM_STRIKES = 3
+PRE_SWING_MOVE_DURATIONS = (0.1, 0.1, 0.5, 0.4, 3.0)
 PRE_SWING_HOLD_DURATION = 0.5
 
 
@@ -26,11 +27,11 @@ def _swing_height(s):
 
 
 def swing_schedule(physics_dt):
-    # 仅构造时使用 NumPy；与原脚本完全相同的 1001 点弧长表。
+    # 仅构造时使用 NumPy，沿固定轨迹建立 1001 点弧长表。
     s = np.linspace(0.0, 1.0, 1001)
     points = np.column_stack((0.40 * s, _swing_height(s)))
     length = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))]
-    duration = math.sqrt(2.0 * length[-1] / 10.0)
+    duration = 0.20
     steps = round(duration / DT)
     return s, length, duration, steps, round(duration / steps / physics_dt)
 
@@ -40,19 +41,19 @@ def _pre_swing_substeps(physics_dt):
     return move_substeps + round(PRE_SWING_HOLD_DURATION / physics_dt)
 
 
-def _attempt_timing(physics_dt, swing_len, unload_time, num_strikes, recover_time):
+def _attempt_timing(physics_dt, swing_len, unload_time, recover_time):
     swing_start = _pre_swing_substeps(physics_dt)
     recovery_steps = round(recover_time / physics_dt)
-    swing_end = swing_start + num_strikes * swing_len + (num_strikes - 1) * recovery_steps
+    swing_end = swing_start + NUM_STRIKES * swing_len + (NUM_STRIKES - 1) * recovery_steps
     unload_end = swing_end + round(unload_time / physics_dt)
     return_steps = round(0.45 / DT) * round(DT / physics_dt)
     return swing_start, recovery_steps, swing_end, unload_end, return_steps
 
 
-def attempt_substeps(physics_dt, unload_time, num_strikes=3, recover_time=0.8):
+def attempt_substeps(physics_dt, unload_time, recover_time=0.5):
     *_, steps, substeps = swing_schedule(physics_dt)
     *_, unload_end, return_steps = _attempt_timing(
-        physics_dt, steps * substeps, unload_time, num_strikes, recover_time)
+        physics_dt, steps * substeps, unload_time, recover_time)
     return unload_end + return_steps
 
 
@@ -83,9 +84,8 @@ def sampled_progress(substep, duration, substeps, quintic=False):
 class GraspResidualActionCfg(ActionTermCfg):
     position_scale: float = 0.10
     rotation_scale: float = math.pi / 5
-    unload_time: float = 1.0
-    num_strikes: int = 3
-    recover_time: float = 0.8
+    unload_time: float = 0.5
+    recover_time: float = 0.5
 
     def build(self, env):
         return GraspResidualAction(self, env)
@@ -140,7 +140,7 @@ class GraspResidualAction(ActionTerm):
         self.swing_len = self.swing_steps * self.swing_substeps
         (self.swing_start, self.recovery_steps, self.swing_end,
          self.unload_end, self.return_steps) = _attempt_timing(
-            env.physics_dt, self.swing_len, cfg.unload_time, cfg.num_strikes, cfg.recover_time)
+            env.physics_dt, self.swing_len, cfg.unload_time, cfg.recover_time)
         self.cycle_steps = self.swing_len + self.recovery_steps
         self.on_physics_step = None  # 仅评估安装，训练路径没有 CPU 同步。
         self._substep = 0
@@ -162,19 +162,19 @@ class GraspResidualAction(ActionTerm):
         self.grasp_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         self.relative_closure_pos = torch.zeros((env.num_envs, 3), device=self.device)
         self.relative_closure_quat = self.identity.clone()
-        self.relative_a_pos = torch.empty_like(self.relative_closure_pos)
-        self.relative_a_quat = torch.empty_like(self.identity)
+        self.relative_initial_pos = torch.empty_like(self.relative_closure_pos)
+        self.relative_initial_quat = torch.empty_like(self.identity)
         self.swing_observed = torch.zeros_like(self.grasp_valid)
         self.dropped = torch.zeros_like(self.grasp_valid)
         self.lost_contact_steps = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.hold_steps = torch.zeros_like(self.lost_contact_steps)
         self.strike_hits = torch.zeros(
-            (env.num_envs, cfg.num_strikes), dtype=torch.bool, device=self.device)
+            (env.num_envs, NUM_STRIKES), dtype=torch.bool, device=self.device)
         self.strike_first_hit_step = torch.zeros(
-            (env.num_envs, cfg.num_strikes), dtype=torch.long, device=self.device)
-        self.strike_impulse = torch.zeros((env.num_envs, cfg.num_strikes), device=self.device)
+            (env.num_envs, NUM_STRIKES), dtype=torch.long, device=self.device)
+        self.strike_impulse = torch.zeros((env.num_envs, NUM_STRIKES), device=self.device)
         self.recovery_ok = torch.zeros(
-            (env.num_envs, cfg.num_strikes - 1), dtype=torch.bool, device=self.device)
+            (env.num_envs, NUM_STRIKES - 1), dtype=torch.bool, device=self.device)
         self.impact_started = torch.zeros_like(self.grasp_valid)
         self.finished = torch.zeros_like(self.grasp_valid)
         self.returning = torch.zeros_like(self.grasp_valid)
@@ -198,9 +198,6 @@ class GraspResidualAction(ActionTerm):
         self.strike_pos = torch.empty_like(self.start_pos)
         self.impact_quat = torch.empty_like(self.start_quat)
         self.raised_quat = torch.empty_like(self.start_quat)
-        self._carry_segments = [(torch.empty_like(self.start_pos), torch.empty_like(self.start_pos),
-                                 torch.empty_like(self.start_quat), torch.empty_like(self.start_pos))
-                                for _ in range(4)]
         self.controls, self.samples = self._schedule()
 
     @property
@@ -233,7 +230,12 @@ class GraspResidualAction(ActionTerm):
         self.pregrasp[env_ids] = pregrasp
         self.start_pos[env_ids] = data.mocap_pos[env_ids, self.mocap]
         self.start_quat[env_ids] = data.mocap_quat[env_ids, self.mocap]
-        self.lifted_pos[env_ids] = pos + 0.25 * self.unit[env_ids, 2]
+        self.lifted_pos[env_ids] = pos + 0.15 * self.unit[env_ids, 2]
+        scene = self.task.scene_id[env_ids]
+        self.relative_initial_pos[env_ids] = quat_apply_inverse(
+            quat, self.task.bank["hammer_pos"][scene] - pos)
+        self.relative_initial_quat[env_ids] = quat_mul(
+            quat_conjugate(quat), self.task.bank["hammer_quat"][scene])
 
     def _store(self, dest, value):
         """训练图内只写当前阶段的世界；同步回放时整批写入。"""
@@ -257,11 +259,9 @@ class GraspResidualAction(ActionTerm):
     def _plan_strike(self):
         data = self._env.sim.data
         mount_pos, mount_quat = data.xpos[:, self.base], data.xquat[:, self.base]
-        hammer_pos, hammer_quat = data.xpos[:, self.hammer], data.xquat[:, self.hammer]
-        face = hammer_pos + quat_apply(hammer_quat, self.face_local)
-        tip_offset = quat_apply_inverse(mount_quat, face - mount_pos)
-        self._store(self.head_offset, quat_apply_inverse(mount_quat,
-            hammer_pos + quat_apply(hammer_quat, self.head_local) - mount_pos))
+        tip_offset = self.relative_initial_pos + quat_apply(self.relative_initial_quat, self.face_local)
+        self._store(self.head_offset,
+            self.relative_initial_pos + quat_apply(self.relative_initial_quat, self.head_local))
         center = (data.site_xpos[:, self.narrow] + data.site_xpos[:, self.wide]) / 2
         self._store(self.grip_offset, quat_apply_inverse(mount_quat, center - mount_pos))
         target_pos = data.site_xpos[:, self.target]
@@ -271,28 +271,11 @@ class GraspResidualAction(ActionTerm):
         self._store(self.horizontal, torch.nn.functional.normalize(torch.cross(self.swing_axis, self.unit[:, 2], dim=-1), dim=-1))
         target_quat = self.task.bank["target_quat"][self.task.scene_id]
         impact_hammer = quat_mul(target_quat, quat_box_plus(self.identity, math.pi * self.unit[:, 1]))
-        self._store(self.impact_quat, quat_mul(impact_hammer, quat_conjugate(self.relative_a_quat)))
+        self._store(self.impact_quat, quat_mul(impact_hammer, quat_conjugate(self.relative_initial_quat)))
         self._store(self.raised_quat, quat_box_plus(self.impact_quat, -math.pi / 3 * self.swing_axis))
         pivot = target_pos - quat_apply(self.impact_quat, tip_offset)
         self._store(self.grip_impact, pivot + quat_apply(self.impact_quat, self.grip_offset))
-        head_impact = pivot + quat_apply(self.impact_quat, self.head_offset)
-        carry_quat = data.mocap_quat[:, self.mocap].clone()
-        head_start = data.mocap_pos[:, self.mocap] + quat_apply(carry_quat, self.head_offset)
-        high_start, high_target = head_start.clone(), head_impact.clone()
-        high_start[:, 2] = high_target[:, 2] = 0.75
         self._store(self.strike_pos, self._swing_pose(0.0)[0])
-        head_strike = self.strike_pos + quat_apply(self.raised_quat, self.head_offset)
-        segments = (
-            (head_start, high_start, carry_quat, carry_quat),
-            (high_start, high_target, carry_quat, carry_quat),
-            (high_target, high_target, carry_quat, self.raised_quat),
-            (high_target, head_strike, self.raised_quat, self.raised_quat),
-        )
-        for (pos, dp, quat, dr), (p0, p1, q0, q1) in zip(self._carry_segments, segments):
-            self._store(pos, p0)
-            self._store(dp, p1 - p0)
-            self._store(quat, q0)
-            self._store(dr, _rotation_delta(q0, q1))
 
     def _swing_pose(self, s):
         angle = -math.pi / 3 * (1 - s)
@@ -305,8 +288,7 @@ class GraspResidualAction(ActionTerm):
         return center - quat_apply(quat, self.grip_offset.expand(*quat.shape[:-1], 3)), quat
 
     def _swing_progress(self, index):
-        distance = 5.0 * (index * self.swing_duration / self.swing_steps)**2
-        d = torch.full((1,), distance, device=self.device)
+        d = self.path_length[-1:] * (index / self.swing_steps)**2
         i = torch.searchsorted(self.path_length, d).clamp(1, 1000)
         fraction = (d - self.path_length[i - 1]) / (self.path_length[i] - self.path_length[i - 1])
         return (self.path_s[i - 1] + fraction * (self.path_s[i] - self.path_s[i - 1]))[0]
@@ -361,9 +343,9 @@ class GraspResidualAction(ActionTerm):
         samples.append((k == self.lift_end, self._lift_snapshot))
         samples.append((k == self.swing_start, self._swing_snapshot))
         samples.append(((self.swing_start < k) & (k <= self.unload_end), self._head_contact))
-        for i in range(self.cfg.num_strikes):
+        for i in range(NUM_STRIKES):
             start = self.swing_start + i * self.cycle_steps
-            last = i == self.cfg.num_strikes - 1
+            last = i == NUM_STRIKES - 1
             end = self.unload_end if last else start + self.cycle_steps
             if not last:
                 samples.append((k == end, partial(self._recovery_snapshot, i=i)))
@@ -378,9 +360,8 @@ class GraspResidualAction(ActionTerm):
             q0 = self.start_quat if segment == 0 else self.final_quat
             p0 = points[segment]
             return p0 + s * (points[segment + 1] - p0), interpolate_quat(q0, self.final_quat, s)
-        p0, delta_pos, q0, delta_rot = self._carry_segments[segment - 4]
-        q = _rotate_by(q0, delta_rot * s)
-        return p0 + s * delta_pos - quat_apply(q, self.head_offset.expand(*q.shape[:-1], 3)), q
+        return (self.lifted_pos + s * (self.strike_pos - self.lifted_pos),
+                interpolate_quat(self.final_quat, self.raised_quat, s))
 
     def _hold_raised(self, k):
         return self.strike_pos, self.raised_quat
@@ -468,15 +449,11 @@ class GraspResidualAction(ActionTerm):
 
     def _lift_snapshot(self, k):
         data, values, bilateral = self._env.sim.data, self.values, self.bilateral
-        # 抬升结束时写入 A 快照的抬升和几何评分，
-        # wrap 在挥击前追加顶靠奖励；保存夹爪系下的锤子位姿，用于规划后续挥击轨迹。
-        p, q = self._relative_pose()
-        self._store(self.relative_a_pos, p)
-        self._store(self.relative_a_quat, q)
+        # 抬升结束时写入 A 快照的抬升和几何评分，wrap 在挥击前追加顶靠奖励。
         initial = self.task.bank["hammer_pos"][self.task.scene_id, 2]
         self._store(values["lift_height"], data.xpos[:, self.hammer, 2] - initial)
         # 有效抬升 lift：锤子相对本场景初态的真实高度增量 >= lift_threshold，且双侧接触。
-        # lift_threshold 当前为 0.15 m；lift_success 是 0/1 日志值，也作为奖励的有效性门控。
+        # lift_threshold 当前为 0.12 m；lift_success 是 0/1 日志值，也作为奖励的有效性门控。
         # 抬升失败时几何分为零；有双侧接触时仍可获得部分抬升进展分。
         lift = (values["lift_height"] >= self._env.cfg.lift_threshold) & bilateral
         self._store(values["lift_success"], lift)
@@ -516,7 +493,7 @@ class GraspResidualAction(ActionTerm):
         head = data.xpos[:, self.hammer] + quat_apply(data.xquat[:, self.hammer], self.head_local)
         distance = ((center - head) * handle_axis).sum(-1)
         self._store(values["distance"], (distance / self._env.cfg.distance_ref).clamp(0, 1) * lift)
-        # 按 A 快照规划后续固定挥击轨迹，同时准备后面投影接触力所需的目标端面法向。
+        # 按初始抓取关系规划后续轨迹，同时准备投影接触力所需的目标端面法向。
         self._plan_strike()
 
     def hold_fraction(self, env_ids=slice(None)):
@@ -529,12 +506,15 @@ class GraspResidualAction(ActionTerm):
         self._store(self.grasp_valid, (values["lift_success"] > 0) & bilateral & ~self.dropped)
         self._store(values["grasp_before_swing"], self.grasp_valid)
         self._store(values["wrap"], values["wrap"] + 0.25 * self.grasp_valid * values["seat_before_swing"] / 1.5)
+        # 人工奖励使用初始抓取关系；配方模式沿用闭合结束的相对位姿。
         if self._env.cfg.reward_recipe is not None:
             self._store(self.swing_observed, True)
-        # 比较闭合结束与挥击前的相对位姿。
+            reference_pos, reference_quat = self.relative_closure_pos, self.relative_closure_quat
+        else:
+            reference_pos, reference_quat = self.relative_initial_pos, self.relative_initial_quat
         p, q = self._relative_pose()
-        self._store(values["translation_drift"], (p - self.relative_closure_pos).norm(dim=-1))
-        self._store(values["rotation_drift"], quat_error_magnitude(self.relative_closure_quat, q))
+        self._store(values["translation_drift"], (p - reference_pos).norm(dim=-1))
+        self._store(values["rotation_drift"], quat_error_magnitude(reference_quat, q))
         x = torch.sqrt(0.5 * ((values["translation_drift"] / self._env.cfg.stability_position_scale).square()
             + (values["rotation_drift"] / self._env.cfg.stability_rotation_scale).square()))
         b, c = math.sqrt(26.0) / 3.0, math.sqrt(10.0)
@@ -571,7 +551,7 @@ class GraspResidualAction(ActionTerm):
         strike_end = strike_start + self.swing_len
         window_steps = round(self._env.cfg.impact_window_s / self._env.physics_dt)
         score_end = (strike_end + window_steps
-                     if strike_id < self.cfg.num_strikes - 1 else self.unload_end)
+                     if strike_id < NUM_STRIKES - 1 else self.unload_end)
         scoring = k <= score_end
         hit = scoring & ~self.returning & holding & touching & (force > 0)
         self._store(self.strike_hits[:, strike_id], self.strike_hits[:, strike_id] | hit)
@@ -597,7 +577,7 @@ class GraspResidualAction(ActionTerm):
         self._store(values["force"], torch.where(~self.returning, force_reward, values["force"]))
 
         # 仅第三次挥击及最终卸载的接触参与原提前卸载逻辑。
-        if strike_id == self.cfg.num_strikes - 1:
+        if strike_id == NUM_STRIKES - 1:
             active = ~self.finished & self.grasp_valid
             self._store(self.impact_started, self.impact_started | (active & touching & (force > 0)))
 

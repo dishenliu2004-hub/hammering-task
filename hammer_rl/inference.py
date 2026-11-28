@@ -9,8 +9,8 @@ from tensordict import TensorDict
 from rsl_rl.utils import resolve_callable
 
 from generation.grasp_hammer import candidate_to_mount
-from .mdp.actions import GraspResidualActionCfg, refine_pose
-from .mdp.resets import public_observation, candidate_observations, bind_candidates
+from generation.actions import GraspResidualActionCfg, refine_pose
+from generation.resets import public_observation, candidate_observations, bind_candidates
 
 
 def load_models(checkpoint, device="cuda:0", *, with_critic=True):

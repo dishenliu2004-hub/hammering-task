@@ -17,8 +17,8 @@ from tensordict import TensorDict
 
 from .collection import HammerTrainingEnv
 from .env_cfg import make_env_cfg
-from .mdp.curriculum import SGS_PARAMS
-from .mdp.resets import restore_start
+from generation.curriculum import SGS_PARAMS
+from generation.resets import restore_start
 from .rl_cfg import ROLLOUT_STEPS, ppo_cfg, distill_cfg
 
 

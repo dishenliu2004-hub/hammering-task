@@ -52,7 +52,7 @@ flowchart TD
 
 ### 3.3 AnyGrasp 引导的 RL Teacher
 
-场景准备阶段缓存初始物理状态、深度图和 AnyGrasp 候选。训练时 SGS 根据各场景最近的 `task_success` 历史分配场景采样概率，reset 再从选中场景的缓存候选中均匀抽取一个。Teacher 使用 87 维 `privileged` 观测，actor 针对该候选输出一次 6 维局部残差。平移按 `tanh` 后的分量乘 `0.10 m`，旋转按 `tanh` 后的轴角分量乘 `π/5 rad`，再与候选基座位姿合成。 [重置与观测](../hammer_rl/mdp/resets.py) · [残差合成与敲击轨迹](../hammer_rl/mdp/actions.py) · [SGS](../hammer_rl/mdp/curriculum.py)
+场景准备阶段缓存初始物理状态、深度图和 AnyGrasp 候选。训练时 SGS 根据各场景最近的 `task_success` 历史分配场景采样概率，reset 再从选中场景的缓存候选中均匀抽取一个。Teacher 使用 87 维 `privileged` 观测，actor 针对该候选输出一次 6 维局部残差。平移按 `tanh` 后的分量乘 `0.10 m`，旋转按 `tanh` 后的轴角分量乘 `π/5 rad`，再与候选基座位姿合成。 [重置与观测](../generation/resets.py) · [残差合成与敲击轨迹](../generation/actions.py) · [SGS](../generation/curriculum.py)
 
 阶段结束后，当前 critic 为 `eval` 划分中每个场景的全部候选评分。Actor 用确定性均值修正最高分候选，仿真执行一次完整尝试，保存指标与回放帧。配方切换发生在两段独立的训练调用之间，续训使用 `--resume`、`--reward-recipe-override` 和本阶段的 `--log-dir`。 [候选推理](../hammer_rl/inference.py) · [训练入口](../hammer_rl/train.py) · [评估入口](../hammer_rl/evaluate.py)
 

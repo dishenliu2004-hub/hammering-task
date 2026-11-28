@@ -1,5 +1,5 @@
 """
-总入口：相机显示 → AnyGrasp 抓姿 → 抓取并抬升 → 敲击。
+总入口：相机显示 → AnyGrasp 抓姿 → 共用执行器抓取、抬升并敲击三次。
 
 cd /home/ubuntu20/CodeMujoco/hammering-task
 
@@ -11,27 +11,30 @@ PYTHONDONTWRITEBYTECODE=1 MUJOCO_GL=glfw \
 """
 
 import argparse
-from functools import partial
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import time
 
 import matplotlib.pyplot as plt
 import mujoco.viewer
 import numpy as np
+import torch
+from mjlab.envs import ManagerBasedRlEnv
 from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from generation.grasp_hammer import generate_grasps
 from generation.hammer_generate import load_random_scene
-from generation.knock_path import hammer_strike, move_to
-from generation.hammer_geometry import STRIKE_FACE_CENTER_LOCAL
+from hammer_rl.env_cfg import make_env_cfg
+from generation.actions import DT
+from generation.observations import sync_data
+from hammer_rl.prepare import (bank_arrays, capture_observation, capture_scene_state,
+                               prepare_candidates)
 from visualization.anygrasp_grasp_visualization import show_grasps
 from visualization.camera_rgb_pointcloud import CameraRGBPointCloud
 from visualization.full_scene_pointcloud import FullScenePointCloud
 from visualization.swing_trajectory import SwingTrajectory
-
-DT = 0.02
 
 
 def main():
@@ -54,57 +57,67 @@ def main():
         if full_scene:
             plt.ion()
             frame = FullScenePointCloud(model, noise=args.noise).capture(data)
+            captured, _ = capture_observation(data, CameraRGBPointCloud(model))
         else:
-            frame = camera.capture(data)
+            captured, frame = capture_observation(data, camera, close_camera=False)
             camera.update(frame)
-        grasps, pose = generate_grasps(model, data, frame, full_scene=full_scene)
+        sample = capture_scene_state(model, data)
+        sample.update(captured)
+        grasps, _ = generate_grasps(model, data, frame, full_scene=full_scene,
+                                   convert_first=False)
         grasp_figure = show_grasps(frame, grasps)
         # 窗口保留抓取前的数据，运动期间仅处理鼠标和窗口事件。
         process_events = grasp_figure.canvas.flush_events
 
-        with mujoco.viewer.launch_passive(model, data) as viewer:
-            move = partial(move_to, model, data, viewer, dt=DT, on_step=process_events,
-                           simulation=simulation)
-            mount_pos, mount_quat = pose["mount_pos"], pose["mount_quat"]
-            move(pose["pregrasp_pos"], mount_quat, 1.0, pose["gripper_open_ctrl"])
-            move(mount_pos, mount_quat, 0.6, pose["gripper_open_ctrl"])
-            move(mount_pos, mount_quat, 0.8, 1.0)
+        candidates = prepare_candidates(grasps, sample, 1)
+        arrays = bank_arrays([sample], candidates, [0, 1])
+        arrays.update(split=np.zeros(1, dtype=np.int64),
+                      hammer_head_extra_mass=np.asarray(args.hammer_head_extra_mass))
+        device = simulation.device
+        del simulation
+        with TemporaryDirectory(prefix="hammer_live_") as directory:
+            bank = Path(directory) / "scene.npz"
+            np.savez(bank, **arrays)
+            cfg = make_env_cfg(args.hammer_head_extra_mass, data_file=bank,
+                               num_envs=1, seed=None, training=False)
+            cfg.randomize_physics = False
+            cfg.events.pop("physics")
+            cfg.auto_reset = False
+            env = ManagerBasedRlEnv(cfg, device=device)
+            try:
+                env.reset()
+                model, data = env.sim.mj_model, mujoco.MjData(env.sim.mj_model)
+                sync_data(env, data)
+                with mujoco.viewer.launch_passive(model, data) as viewer:
+                    swing_trajectory = SwingTrajectory(viewer)
 
-            # 沿用原抓稳判断和抬升轨迹，不重新创建场景。
-            mocap_id = model.body_mocapid[model.body("gripper_mount").id]
-            mount_rot = Rotation.from_quat(mount_quat[[1, 2, 3, 0]])
-            hammer_pos = data.body("hammer_Object").xpos.copy()
-            grasp_relative = mount_rot.inv().apply(hammer_pos - data.mocap_pos[mocap_id])
-            move(mount_pos + [0, 0, 0.25], mount_quat, 0.8, 1.0)
-            lifted_relative = mount_rot.inv().apply(
-                data.body("hammer_Object").xpos - data.mocap_pos[mocap_id]
-            )
-            if np.linalg.norm(lifted_relative - grasp_relative) > 0.04:
-                raise RuntimeError("锤子未抓稳，未执行敲击")
+                    def display(term):
+                        if term._substep % term.substeps == 0:
+                            start = time.monotonic()
+                            sync_data(env, data)
+                            if term.swing_start <= term._substep <= term.swing_end:
+                                rot = Rotation.from_quat(data.mocap_quat[term.mocap][[1, 2, 3, 0]])
+                                offsets = torch.stack((term.grip_offset[0], term.head_offset[0])).cpu().numpy()
+                                grip, head = data.mocap_pos[term.mocap] + rot.apply(offsets)
+                                swing_trajectory(grip, head)
+                            viewer.sync()
+                            process_events()
+                            time.sleep(max(0.0, DT - (time.monotonic() - start)))
 
-            mount_body, hammer_body = data.body("gripper_base_link"), data.body("hammer_Object")
-            actual_mount_rot = Rotation.from_matrix(mount_body.xmat.reshape(3, 3))
-            actual_hammer_rot = Rotation.from_matrix(hammer_body.xmat.reshape(3, 3))
-            face_pos = hammer_body.xpos + actual_hammer_rot.apply(STRIKE_FACE_CENTER_LOCAL)
-            tip_offset = actual_mount_rot.inv().apply(face_pos - mount_body.xpos)
-            relative_rot = actual_mount_rot.inv() * actual_hammer_rot
-            target_site = data.site("cylinder_endface_force_frame")
-            impact_hammer_rot = (Rotation.from_matrix(target_site.xmat.reshape(3, 3))
-                                 * Rotation.from_euler("y", np.pi))
-            impact_mount_rot = impact_hammer_rot * relative_rot.inv()
-            swing_trajectory = SwingTrajectory(viewer)
-            impact_force = hammer_strike(
-                model, data, mount_body.xpos.copy(), mount_body.xquat.copy(),
-                target_site.xpos.copy(), tip_offset, impact_mount_rot.as_quat()[[3, 0, 1, 2]],
-                gripper_action=1.0, dt=DT, viewer=viewer, on_step=process_events,
-                simulation=simulation, on_swing_step=swing_trajectory,
-            )
-            print(f"首次接触后40ms平均法向敲击力：{impact_force.mean_force:.6f} N")
-            print(f"挥击开始时夹爪抓取中心到锤头中心距离：{impact_force.distance:.6f} m")
-            # 动作完成后继续保留初始画面，直到关闭 MuJoCo 窗口。
-            while viewer.is_running():
-                process_events()
-                time.sleep(0.05)
+                    term = env.action_manager.get_term("grasp")
+                    term.on_physics_step = display
+                    with torch.inference_mode():
+                        env.step(torch.zeros((1, env.action_manager.total_action_dim), device=device))
+                    for name in ("strike_force_1", "strike_force_2", "strike_force_3", "mean_force"):
+                        print(f"{name}: {float(term.values[name][0]):.6f} N")
+                    print(f"hit_count: {int(term.values['hit_count'][0])}/3")
+                    print(f"task_success: {int(term.values['task_success'][0])}")
+                    # 动作完成后保留终局和抓取前画面，直到关闭 MuJoCo 窗口。
+                    while viewer.is_running():
+                        process_events()
+                        time.sleep(0.05)
+            finally:
+                env.close()
     finally:
         if not full_scene:
             camera.close()
